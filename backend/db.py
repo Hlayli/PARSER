@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS business_location (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
     address TEXT NOT NULL DEFAULT '',
+    address_key TEXT NOT NULL DEFAULT '',
     phone TEXT NOT NULL DEFAULT '',
     lat REAL,
     lon REAL,
@@ -130,6 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_cell_job ON scan_cell(job_id, status);
 CREATE INDEX IF NOT EXISTS idx_bsource ON business_source(business_id);
 CREATE INDEX IF NOT EXISTS idx_location_business ON business_location(business_id);
 CREATE INDEX IF NOT EXISTS idx_location_address ON business_location(address);
+CREATE INDEX IF NOT EXISTS idx_location_address_key ON business_location(address_key);
 """
 
 STATUSES = ("new", "in_progress", "called", "rejected")
@@ -181,6 +183,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE business ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
             )
+    location_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(business_location)")
+    }
+    if "address_key" not in location_columns:
+        conn.execute(
+            "ALTER TABLE business_location ADD COLUMN address_key TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
 
 
@@ -420,12 +429,14 @@ def _link_location(conn: sqlite3.Connection, business_id: str, place: Place) -> 
     """Запомнить точку сети: адрес, телефон и координаты конкретного филиала."""
     conn.execute(
         """INSERT INTO business_location
-               (business_id, source, source_id, address, phone, lat, lon, url)
-           VALUES (?,?,?,?,?,?,?,?)
+               (business_id, source, source_id, address, address_key, phone, lat, lon, url)
+           VALUES (?,?,?,?,?,?,?,?,?)
            ON CONFLICT(business_id, source, source_id) DO UPDATE SET
-               address = excluded.address, phone = excluded.phone,
-               lat = excluded.lat, lon = excluded.lon, url = excluded.url""",
-        (business_id, place.source, place.source_id, place.address, place.phone,
+               address = excluded.address, address_key = excluded.address_key,
+               phone = excluded.phone, lat = excluded.lat, lon = excluded.lon,
+               url = excluded.url""",
+        (business_id, place.source, place.source_id, place.address,
+         dedup.address_key(place.address), place.phone,
          place.lat, place.lon, place.url),
     )
 
@@ -441,12 +452,24 @@ def backfill_locations(conn: sqlite3.Connection) -> int:
     for row in rows:
         conn.execute(
             """INSERT OR REPLACE INTO business_location
-                   (business_id, source, source_id, address, phone, lat, lon, url)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                   (business_id, source, source_id, address, address_key, phone, lat, lon, url)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (row["id"], row["source"], row["source_id"], row["address"],
-             row["phone"], row["lat"], row["lon"], row["url"]),
+             dedup.address_key(row["address"]), row["phone"],
+             row["lat"], row["lon"], row["url"]),
         )
-    if rows:
+    pending = conn.execute(
+        "SELECT business_id, source, source_id, address FROM business_location "
+        "WHERE address_key = '' AND address != ''"
+    ).fetchall()
+    for row in pending:
+        conn.execute(
+            "UPDATE business_location SET address_key = ? "
+            "WHERE business_id = ? AND source = ? AND source_id = ?",
+            (dedup.address_key(row["address"]), row["business_id"],
+             row["source"], row["source_id"]),
+        )
+    if rows or pending:
         conn.commit()
     return len(rows)
 
@@ -475,7 +498,9 @@ def _lead_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
         )
     ]
     locations_count = conn.execute(
-        "SELECT COUNT(*) c FROM business_location WHERE business_id = ?", (row["id"],)
+        "SELECT COUNT(DISTINCT CASE WHEN address_key != '' THEN address_key "
+        "ELSE '#' || rowid END) c FROM business_location WHERE business_id = ?",
+        (row["id"],),
     ).fetchone()["c"] or 1
     try:
         photos = json.loads(row["photos_json"] or "[]")
@@ -571,20 +596,47 @@ def get_lead(conn: sqlite3.Connection, business_id: str) -> dict | None:
             {"value": f["value"], "source_url": f["source_url"], "fetched_at": f["fetched_at"]}
         )
     lead["facts"] = facts
-    lead["locations"] = [
-        {
-            "address": r["address"],
-            "phone": r["phone"],
-            "lat": r["lat"],
-            "lon": r["lon"],
-            "source": r["source"],
-            "url": r["url"],
-        }
-        for r in conn.execute(
-            "SELECT address, phone, lat, lon, source, url FROM business_location "
-            "WHERE business_id = ? ORDER BY address, phone", (business_id,)
-        )
-    ]
+    # Один и тот же адрес из 2ГИС и Яндекса — одна точка: склеиваем строки,
+    # но сохраняем оба источника.
+    locations: list[dict] = []
+    for r in conn.execute(
+        "SELECT address, address_key, phone, lat, lon, source, url "
+        "FROM business_location WHERE business_id = ? ORDER BY address_key, address, source",
+        (business_id,),
+    ):
+        merged = None
+        if r["address_key"]:
+            for location in locations:
+                if location["_key"] != r["address_key"]:
+                    continue
+                phone_a = dedup.normalize_phone(location["phone"])
+                phone_b = dedup.normalize_phone(r["phone"])
+                if not phone_a or not phone_b or phone_a == phone_b:
+                    merged = location
+                    break
+        if merged is None:
+            merged = {
+                "_key": r["address_key"],
+                "address": r["address"],
+                "phone": r["phone"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "sources": [r["source"]],
+                "url": r["url"],
+            }
+            locations.append(merged)
+            continue
+        if not merged["phone"] and r["phone"]:
+            merged["phone"] = r["phone"]
+        if not merged["url"] and r["url"]:
+            merged["url"] = r["url"]
+        if merged["lat"] is None and r["lat"] is not None:
+            merged["lat"], merged["lon"] = r["lat"], r["lon"]
+        if r["source"] not in merged["sources"]:
+            merged["sources"].append(r["source"])
+    for location in locations:
+        location.pop("_key", None)
+    lead["locations"] = locations
     lead["source_links"] = [
         {"source": r["source"], "url": r["url"]} for r in conn.execute(
             "SELECT source, url FROM business_source WHERE business_id = ?", (business_id,)
@@ -777,20 +829,22 @@ def _merge_rows(conn: sqlite3.Connection, keep_id: str, drop_id: str) -> None:
     if not has_location:
         conn.execute(
             """INSERT OR IGNORE INTO business_location
-                   (business_id, source, source_id, address, phone, lat, lon, url)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                   (business_id, source, source_id, address, address_key, phone, lat, lon, url)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (keep_id, drop["source"], drop["source_id"], drop["address"],
-             drop["phone"], drop["lat"], drop["lon"], drop["url"]),
+             dedup.address_key(drop["address"]), drop["phone"],
+             drop["lat"], drop["lon"], drop["url"]),
         )
     for location in conn.execute(
-        "SELECT source, source_id, address, phone, lat, lon, url FROM business_location "
-        "WHERE business_id = ?", (drop_id,)
+        "SELECT source, source_id, address, address_key, phone, lat, lon, url "
+        "FROM business_location WHERE business_id = ?", (drop_id,)
     ):
         conn.execute(
             """INSERT OR IGNORE INTO business_location
-                   (business_id, source, source_id, address, phone, lat, lon, url)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                   (business_id, source, source_id, address, address_key, phone, lat, lon, url)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (keep_id, location["source"], location["source_id"], location["address"],
+             location["address_key"] or dedup.address_key(location["address"]),
              location["phone"], location["lat"], location["lon"], location["url"]),
         )
     conn.execute("DELETE FROM business_location WHERE business_id = ?", (drop_id,))

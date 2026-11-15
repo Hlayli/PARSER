@@ -1027,7 +1027,7 @@ function renderDetail(lead) {
               ${location.phone && telHref(location.phone)
                 ? `<a href="${escapeHtml(telHref(location.phone))}">${escapeHtml(location.phone)}</a>`
                 : '<span class="no-data">телефон не указан</span>'}
-              <span class="badge badge--source">${escapeHtml(SOURCE_LABELS[location.source] || location.source)}</span>
+              <span class="badge badge--source">${escapeHtml((location.sources || [location.source]).map((source) => SOURCE_LABELS[source] || source).join(' · '))}</span>
             </div>
           </div>
         </li>`).join('')}</ul>

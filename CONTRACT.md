@@ -148,7 +148,9 @@ scan_cell(id INTEGER PK, job_id TEXT, ix INTEGER, iy INTEGER,
 
 При совпадении — дозаполнить пустые поля, добавить строку в `business_source`
 и точку в `business_location`, `is_new=False`. `get_lead` возвращает
-`locations_count` и `locations` (адрес, телефон, координаты, источник, url).
+`locations_count` и `locations` (адрес, телефон, координаты, `sources`, url).
+Одна точка, пришедшая из 2ГИС и Яндекса с разным написанием адреса, схлопывается
+в одну строку, оба источника остаются в `sources`.
 Склейка накопленной базы — `python -m backend.merge_duplicates [--apply]`.
 
 `fact.kind`: `email | phone | price | photo | social | director | description | inn | hours | address`.

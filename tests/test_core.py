@@ -135,7 +135,7 @@ class DbTestCase(unittest.TestCase):
         # «SwipeCoffee» из 2ГИС и «Swipe Coffee» из Яндекса: адрес с городом
         # и районом, метки в 120 м друг от друга — это одна кофейня.
         first, _ = db.upsert_place(self.conn, self.place(
-            phone="", source_id="2g-1", name="SwipeCoffee",
+            source="2gis", phone="", source_id="2g-1", name="SwipeCoffee",
             address="Дачная улица, 5", lat=54.6145, lon=39.7233))
         second, is_new = db.upsert_place(self.conn, self.place(
             source="yandex", source_id="y-1", phone="", name="Swipe Coffee",
@@ -144,6 +144,14 @@ class DbTestCase(unittest.TestCase):
         self.assertFalse(is_new)
         self.assertEqual(first, second)
         self.assertEqual(db.stats(self.conn)["total"], 1)
+
+        # Это одна точка: в списке она одна, но оба источника сохранены.
+        lead = db.get_lead(self.conn, first)
+        self.assertEqual(lead["locations_count"], 1)
+        self.assertEqual(len(lead["locations"]), 1)
+        self.assertEqual(
+            set(lead["locations"][0]["sources"]), {"2gis", "yandex"}
+        )
 
     def test_chain_branches_one_card_with_locations(self) -> None:
         # Одна сеть — одна карточка, а адреса и телефоны точек внутри неё.
