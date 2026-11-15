@@ -1,0 +1,24 @@
+{
+  "name": "PARSER",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "containerEnv": {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PARSER_DEMO": "1"
+  },
+  "postCreateCommand": "pip install --disable-pip-version-check -r requirements.txt",
+  "postStartCommand": "bash .devcontainer/start.sh",
+  "forwardPorts": [8777],
+  "portsAttributes": {
+    "8777": {
+      "label": "PARSER web",
+      "onAutoForward": "openBrowser",
+      "visibility": "private"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}
