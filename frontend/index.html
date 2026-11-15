@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>PARSER — поиск и обзвон бизнеса</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261114b">
+</head>
+<body>
+  <a class="skip-link" href="#lead-list">Перейти к списку лидов</a>
+
+  <div class="app" id="app">
+    <aside class="sidebar" aria-label="Панель сканирования">
+      <header class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div class="brand-text">
+          <div class="brand-title">PARSER</div>
+          <div class="brand-sub">поиск и обзвон бизнеса</div>
+        </div>
+        <span class="badge badge--demo" id="demo-badge" hidden>ДЕМО</span>
+      </header>
+
+      <div class="sidebar-scroll">
+        <section class="panel-section" aria-labelledby="scan-title">
+          <h2 class="section-title" id="scan-title">Сканирование</h2>
+          <form class="scan-form" id="scan-form" novalidate>
+            <div class="field">
+              <span class="field-label" id="category-label">Что ищем</span>
+              <button class="category-trigger" id="category-trigger" type="button"
+                      aria-haspopup="dialog" aria-controls="category-modal"
+                      aria-labelledby="category-label category-summary">
+                <span class="category-trigger-text" id="category-summary">Выберите категории</span>
+                <span class="category-trigger-count" id="category-count">0</span>
+                <svg class="category-trigger-icon" width="14" height="14" viewBox="0 0 24 24"
+                     fill="none" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+              </button>
+              <p class="field-hint" id="category-hint">Можно выбрать несколько ниш или все сразу.</p>
+            </div>
+
+            <label class="field">
+              <span class="field-label">Свой запрос <span class="field-optional">— необязательно</span></span>
+              <input id="scan-query" name="query" type="text" placeholder="например, батутный центр"
+                     autocomplete="off" spellcheck="false">
+            </label>
+
+            <label class="field">
+              <span class="field-label">Город</span>
+              <input id="scan-city" name="city" type="text" placeholder="Тюмень" autocomplete="off" spellcheck="false">
+            </label>
+
+            <label class="field">
+              <span class="field-label">Размер квадрата, °</span>
+              <select id="scan-cell" name="cell_deg">
+                <option value="0.02">0.02 — плотно</option>
+                <option value="0.03">0.03</option>
+                <option value="0.05" selected>0.05 — обычно</option>
+                <option value="0.08">0.08 — быстро</option>
+                <option value="0.1">0.1 — очень быстро</option>
+              </select>
+              <p class="field-hint">Меньше квадрат — плотнее покрытие и дольше скан.</p>
+            </label>
+
+            <p class="scan-estimate" id="scan-estimate" role="status"></p>
+
+            <fieldset class="sources">
+              <legend class="field-label">Источники</legend>
+              <div class="sources-list" id="sources-list">
+                <p class="sources-loading">Проверяем доступность источников…</p>
+              </div>
+            </fieldset>
+
+            <button class="btn btn--primary btn--full" id="scan-start" type="submit">
+              <span class="spinner" id="scan-spinner" hidden aria-hidden="true"></span>
+              <span>Начать сканирование</span>
+            </button>
+          </form>
+        </section>
+
+        <section class="panel-section" aria-labelledby="progress-title">
+          <div class="progress-head">
+            <h2 class="section-title" id="progress-title">Прогресс</h2>
+            <div class="progress-head-actions">
+              <button class="job-stop" id="scan-stop" type="button" hidden>Стоп</button>
+              <span class="job-chip" id="job-status">ожидание</span>
+            </div>
+          </div>
+          <div
+            class="progress-bar"
+            id="progress-bar"
+            role="progressbar"
+            aria-labelledby="progress-title"
+            aria-valuemin="0"
+            aria-valuemax="0"
+            aria-valuenow="0"
+          >
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <p class="progress-text" id="progress-text" role="status">0 / 0 квадратов · 0 лидов</p>
+          <p class="progress-sub" id="progress-sub" hidden></p>
+        </section>
+
+        <section class="panel-section" aria-labelledby="cells-title">
+          <div class="progress-head">
+            <h2 class="section-title" id="cells-title">Квадраты</h2>
+            <span class="cells-count" id="cells-count">0</span>
+          </div>
+          <div class="cell-grid-wrap">
+            <div class="cell-grid" id="cell-grid" role="list" aria-label="Сетка квадратов сканирования"></div>
+            <p class="grid-empty" id="grid-empty">Сетка появится после запуска сканирования.</p>
+          </div>
+          <div class="legend" aria-label="Обозначения статусов">
+            <span class="legend-item"><span class="legend-dot legend-dot--pending"></span>ожидает</span>
+            <span class="legend-item"><span class="legend-dot legend-dot--running"></span>в работе</span>
+            <span class="legend-item"><span class="legend-dot legend-dot--done"></span>готово</span>
+            <span class="legend-item"><span class="legend-dot legend-dot--error"></span>ошибка</span>
+          </div>
+        </section>
+      </div>
+
+      <footer class="sidebar-footer">
+        <span class="stream-dot" id="stream-dot" aria-hidden="true"></span>
+        <span id="stream-text">Поток событий: подключение…</span>
+      </footer>
+    </aside>
+
+    <main class="leads-pane" aria-labelledby="leads-title">
+      <header class="leads-header">
+        <div class="leads-title-row">
+          <h1 id="leads-title">Лиды</h1>
+          <span class="count-badge" id="leads-total" aria-live="polite">0</span>
+          <span class="leads-summary" id="leads-summary"></span>
+        </div>
+
+        <div class="filters">
+          <div class="search-box">
+            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"></circle>
+              <path d="M16.5 16.5 21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+            </svg>
+            <input
+              id="filter-q"
+              type="search"
+              placeholder="Поиск по названию"
+              aria-label="Поиск по названию"
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <button class="search-clear" id="filter-clear" type="button" aria-label="Очистить поиск" hidden>✕</button>
+          </div>
+
+          <div class="filter-row">
+            <label class="filter-control">
+              <span class="sr-only">Статус</span>
+              <select id="filter-status" aria-label="Фильтр по статусу">
+                <option value="">Все статусы</option>
+                <option value="new">Новые</option>
+                <option value="in_progress">В работе</option>
+                <option value="called">Отзвонено</option>
+                <option value="rejected">Отказ</option>
+              </select>
+            </label>
+
+            <label class="filter-control">
+              <span class="sr-only">Сортировка</span>
+              <select id="filter-sort" aria-label="Сортировка лидов">
+                <option value="newest">Сначала новые</option>
+                <option value="rating">По рейтингу</option>
+                <option value="name">По названию</option>
+              </select>
+            </label>
+
+            <label class="checkbox-toggle" id="filter-fav-label">
+              <input id="filter-fav" type="checkbox">
+              <span>Только избранные</span>
+            </label>
+          </div>
+        </div>
+      </header>
+
+      <div class="lead-list-wrap" id="lead-list-wrap">
+        <div class="lead-list" id="lead-list"></div>
+
+        <div class="leads-loading" id="leads-loading" hidden>
+          <span class="spinner spinner--accent" aria-hidden="true"></span>
+          <span>Загружаем лиды…</span>
+        </div>
+
+        <div class="empty-state" id="leads-empty" hidden>
+          <svg class="empty-icon" width="52" height="52" viewBox="0 0 52 52" fill="none" aria-hidden="true">
+            <circle cx="26" cy="26" r="18" stroke="currentColor" stroke-width="1.5" opacity="0.5"></circle>
+            <circle cx="26" cy="26" r="10" stroke="currentColor" stroke-width="1.5" opacity="0.35"></circle>
+            <circle cx="26" cy="26" r="2.5" fill="currentColor"></circle>
+            <path d="M26 2v7M26 43v7M2 26h7M43 26h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.5"></path>
+          </svg>
+          <p class="empty-text">Пока ничего не найдено. Запустите сканирование слева.</p>
+          <button class="btn btn--ghost" id="empty-reset" type="button" hidden>Сбросить фильтры</button>
+        </div>
+
+        <div class="leads-error" id="leads-error" hidden>
+          <p>Не удалось загрузить лиды.</p>
+          <button class="btn btn--ghost" id="leads-error-retry" type="button">Повторить</button>
+        </div>
+
+        <div class="load-more-wrap" id="load-more-wrap" hidden>
+          <button class="btn btn--ghost" id="load-more-btn" type="button">Показать ещё</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="detail-pane" id="detail-pane" aria-label="Карточка бизнеса" hidden>
+      <header class="detail-head">
+        <span class="section-title">Карточка бизнеса</span>
+        <button class="icon-btn detail-close" id="detail-close" type="button" aria-label="Закрыть карточку" title="Закрыть">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+          </svg>
+        </button>
+      </header>
+      <div class="detail-scroll" id="detail-content"></div>
+    </aside>
+  </div>
+
+  <div class="modal-backdrop" id="category-backdrop" hidden>
+    <div class="category-modal" id="category-modal" role="dialog" aria-modal="true"
+         aria-labelledby="category-title">
+      <header class="category-head">
+        <div>
+          <h2 class="category-title" id="category-title">Что ищем</h2>
+          <p class="category-sub" id="category-sub">Включите ниши переключателями. Можно выбрать все.</p>
+        </div>
+        <button class="icon-btn" id="category-close" type="button" aria-label="Закрыть" title="Закрыть">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round"></path>
+          </svg>
+        </button>
+      </header>
+
+      <div class="category-toolbar">
+        <div class="search-box category-search">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"></circle>
+            <path d="M16.5 16.5 21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+          </svg>
+          <input id="category-search" type="search" placeholder="Найти нишу"
+                 aria-label="Поиск по категориям" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="category-actions">
+          <button class="btn btn--ghost btn--sm" id="category-popular" type="button"
+                  title="12 ниш, где чаще всего нужен сайт">Хиты</button>
+          <button class="btn btn--ghost btn--sm" id="category-all" type="button">Все</button>
+          <button class="btn btn--ghost btn--sm" id="category-none" type="button">Сбросить</button>
+        </div>
+      </div>
+
+      <div class="category-meta">
+        <label class="checkbox-toggle category-all-toggle">
+          <input id="category-all-toggle" type="checkbox">
+          <span>Все категории</span>
+        </label>
+        <span class="category-selected-count" id="category-selected-count">Выбрано: 0</span>
+      </div>
+
+      <div class="category-groups" id="category-groups" aria-live="polite"></div>
+
+      <footer class="category-foot">
+        <p class="category-note" id="category-note">Выбранные ниши сканируются по очереди, по всем квадратам.</p>
+        <div class="category-foot-actions">
+          <button class="btn btn--ghost" id="category-cancel" type="button">Отмена</button>
+          <button class="btn btn--primary" id="category-apply" type="button">Применить</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div class="detail-backdrop" id="detail-backdrop" hidden></div>
+  <div class="cell-tooltip" id="cell-tooltip" hidden></div>
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <script src="/static/app.js?v=20261114b" defer></script>
+</body>
+</html>
