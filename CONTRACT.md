@@ -10,7 +10,9 @@
 
 | Файл / папка | Владелец | Назначение |
 |---|---|---|
-| `backend/db.py` | core | подключение, схема, upsert, дедуп |
+| `backend/db.py` | core | подключение, схема, upsert, выборки |
+| `backend/dedup.py` | core | нормализация и сравнение организаций, `brand_key` |
+| `backend/merge_duplicates.py` | core | CLI поиска и склейки дубликатов в базе |
 | `backend/models.py` | core | dataclass `Place`, `BBox` |
 | `backend/scanner.py` | core | сетка, очередь, SSE-события |
 | `backend/categories.py` | core | каталог ниш и сборка поисковых запросов |
@@ -101,6 +103,9 @@ def set_status(conn, business_id: str, status: str | None = None,
 def add_fact(conn, business_id: str, kind: str, value: str,
              source_url: str) -> None
 def stats(conn) -> dict
+def find_duplicate_groups(conn) -> list[dict]
+def merge_duplicate_groups(conn) -> int
+def backup_database(destination: Path) -> Path
 ```
 
 Схема:
@@ -111,6 +116,8 @@ business(
   address TEXT, lat REAL, lon REAL, phone TEXT, phone_norm TEXT,
   website TEXT, rating REAL, reviews_count INTEGER, price_range TEXT,
   hours TEXT, photos_json TEXT, url TEXT,
+  name_key TEXT, compact_key TEXT, brand_key TEXT,
+  address_key TEXT, phone_keys TEXT, site_key TEXT,
   status TEXT DEFAULT 'new',        -- new|in_progress|called|rejected
   is_favorite INTEGER DEFAULT 0,
   note TEXT DEFAULT '',
@@ -119,6 +126,8 @@ business(
 )
 business_source(business_id, source, source_id, url, payload_json,
                 PRIMARY KEY(business_id, source, source_id))
+business_location(business_id, source, source_id, address, phone, lat, lon, url,
+                  PRIMARY KEY(business_id, source, source_id))
 fact(id INTEGER PK, business_id, kind, value, source_url, fetched_at)
 scan_job(id TEXT PK, query TEXT, queries_json TEXT, query_index INTEGER,
          city TEXT, bbox_json TEXT, cell_deg REAL,
@@ -130,9 +139,17 @@ scan_cell(id INTEGER PK, job_id TEXT, ix INTEGER, iy INTEGER,
           started_at TEXT, finished_at TEXT)
 ```
 
-Дедуп в `upsert_place`: сначала по `phone_norm`, иначе по `lower(name)` + расстояние < 250 м.
-Склейка по имени выполняется только при наличии координат у обеих записей.
-При совпадении — дозаполнить пустые поля, добавить строку в `business_source`, `is_new=False`.
+Дедуп в `upsert_place` (`backend/dedup.py`):
+1. та же запись источника (`source`+`source_id`);
+2. сеть — `brand_key` (название без пробелов и оргформ, кроме родовых слов);
+3. та же точка — телефон, адрес, сайт, название и расстояние; координаты —
+   слабый сигнал, разные дома — стоп-сигнал;
+4. демо и реальные записи не склеиваются.
+
+При совпадении — дозаполнить пустые поля, добавить строку в `business_source`
+и точку в `business_location`, `is_new=False`. `get_lead` возвращает
+`locations_count` и `locations` (адрес, телефон, координаты, источник, url).
+Склейка накопленной базы — `python -m backend.merge_duplicates [--apply]`.
 
 `fact.kind`: `email | phone | price | photo | social | director | description | inn | hours | address`.
 `fact.value` — точный текст со страницы. `source_url` — страница, откуда взято. Обязательно.
@@ -190,7 +207,7 @@ SCANNER: ScanManager   # глобальный синглтон
 | POST | `/api/jobs/{id}/resume` | — | `{ok}` |
 | POST | `/api/jobs/{id}/stop` | — | `{ok}` |
 | GET | `/api/leads` | `status, source, q, fav, sort, limit, offset` | `{total, items:[...]}` |
-| GET | `/api/leads/{id}` | — | полная карточка + `facts`, `sources` |
+| GET | `/api/leads/{id}` | — | полная карточка + `facts`, `sources`, `locations` |
 | PATCH | `/api/leads/{id}` | `{status?, is_favorite?, note?}` | `{ok, lead}` |
 | POST | `/api/leads/{id}/enrich` | — | `{added:{...}, errors:[], lead:{...}}` |
 | GET | `/api/stats` | — | `{total, by_status:{...}, by_source:{...}, favorites, with_site, no_site}` |

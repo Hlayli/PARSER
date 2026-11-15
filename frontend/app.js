@@ -782,6 +782,9 @@ function renderLeadCard(lead) {
     badges.push(`<span class="badge badge--source">${escapeHtml(SOURCE_LABELS[source] || source)}</span>`);
   }
   badges.push(`<span class="badge badge--${escapeHtml(lead.status)}">${escapeHtml(STATUS_LABELS[lead.status] || lead.status)}</span>`);
+  if ((lead.locations_count || 0) > 1) {
+    badges.push(`<span class="badge badge--chain">сеть · ${lead.locations_count}</span>`);
+  }
 
   const rating = lead.rating
     ? `<span class="lead-rating"><span class="star">★</span> ${escapeHtml(lead.rating)}</span>`
@@ -949,6 +952,9 @@ function renderDetail(lead) {
   const innFacts = facts.inn || [];
   const hoursFacts = facts.hours || [];
   const descriptionFacts = facts.description || [];
+  const locations = (lead.locations || []).filter(
+    (location) => location.address || location.phone,
+  );
 
   const badges = [];
   if (lead.is_demo) badges.push('<span class="badge badge--demo">ДЕМО</span>');
@@ -956,6 +962,9 @@ function renderDetail(lead) {
     badges.push(`<span class="badge badge--source">${escapeHtml(SOURCE_LABELS[source] || source)}</span>`);
   }
   badges.push(`<span class="badge badge--${escapeHtml(lead.status)}">${escapeHtml(STATUS_LABELS[lead.status] || lead.status)}</span>`);
+  if (locations.length > 1) {
+    badges.push(`<span class="badge badge--chain">сеть · ${locations.length}</span>`);
+  }
 
   const website = safeUrl(lead.website);
   const phoneHref = telHref(lead.phone);
@@ -1005,6 +1014,24 @@ function renderDetail(lead) {
         <div class="detail-row"><dt>Обновлено</dt><dd>${formatDate(lead.updated_at)}</dd></div>
       </dl>
     </section>
+
+    ${locations.length > 1 ? `
+    <section class="detail-section">
+      <h3 class="detail-section-title">Точки сети <span class="count">${locations.length}</span></h3>
+      <ul class="location-list">${locations.map((location, index) => `
+        <li class="location-item">
+          <span class="location-num">${index + 1}</span>
+          <div class="location-body">
+            <div class="location-address">${escapeHtml(location.address || 'адрес не указан')}</div>
+            <div class="location-meta">
+              ${location.phone && telHref(location.phone)
+                ? `<a href="${escapeHtml(telHref(location.phone))}">${escapeHtml(location.phone)}</a>`
+                : '<span class="no-data">телефон не указан</span>'}
+              <span class="badge badge--source">${escapeHtml(SOURCE_LABELS[location.source] || location.source)}</span>
+            </div>
+          </div>
+        </li>`).join('')}</ul>
+    </section>` : ''}
 
     ${photos.length ? `
     <section class="detail-section">

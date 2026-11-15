@@ -25,7 +25,8 @@ from backend.models import Place  # noqa: E402
 def clear_db() -> None:
     db.init_db()
     with db.connect() as conn:
-        for table in ("fact", "business_source", "business", "scan_cell", "scan_job"):
+        for table in ("fact", "business_source", "business_location", "business",
+                      "scan_cell", "scan_job"):
             conn.execute(f"DELETE FROM {table}")
         conn.commit()
 
@@ -98,21 +99,141 @@ class DbTestCase(unittest.TestCase):
         self.assertFalse(is_new)
         self.assertEqual(first, second)
 
-    def test_no_merge_by_name_without_coordinates(self) -> None:
-        db.upsert_place(self.conn, self.place(
+    def test_merge_by_name_and_address_without_coordinates(self) -> None:
+        # Координат нет, но название и адрес совпадают — это одна организация.
+        first, _ = db.upsert_place(self.conn, self.place(
             phone="", source_id="g-1", lat=None, lon=None))
         second, is_new = db.upsert_place(self.conn, self.place(
             source="2gis", source_id="2g-1", phone="", lat=None, lon=None))
+        self.assertFalse(is_new)
+        self.assertEqual(first, second)
+        self.assertEqual(db.stats(self.conn)["total"], 1)
+
+    def test_same_brand_different_address_merged(self) -> None:
+        # Одна сеть — одна карточка, даже без координат и с разными адресами.
+        first, _ = db.upsert_place(self.conn, self.place(
+            phone="", source_id="g-1", lat=None, lon=None))
+        second, is_new = db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-1", phone="", lat=None, lon=None,
+            address="ул. Свободы, 40"))
+        self.assertFalse(is_new)
+        self.assertEqual(first, second)
+        self.assertEqual(db.stats(self.conn)["total"], 1)
+
+    def test_generic_name_different_address_not_merged(self) -> None:
+        # «Кофейня» — родовое слово, а не бренд: две точки остаются двумя.
+        db.upsert_place(self.conn, self.place(
+            phone="", source_id="g-1", name="Кофейня",
+            address="улица Ленина, 12", lat=54.62339, lon=39.754168))
+        second, is_new = db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-1", phone="", name="Кофейня",
+            address="улица Почтовая, 4 к1", lat=54.788874, lon=39.832514))
         self.assertTrue(is_new)
-        self.assertNotEqual(second, "")
         self.assertEqual(db.stats(self.conn)["total"], 2)
+
+    def test_dedupe_name_variants_and_address_prefix(self) -> None:
+        # «SwipeCoffee» из 2ГИС и «Swipe Coffee» из Яндекса: адрес с городом
+        # и районом, метки в 120 м друг от друга — это одна кофейня.
+        first, _ = db.upsert_place(self.conn, self.place(
+            phone="", source_id="2g-1", name="SwipeCoffee",
+            address="Дачная улица, 5", lat=54.6145, lon=39.7233))
+        second, is_new = db.upsert_place(self.conn, self.place(
+            source="yandex", source_id="y-1", phone="", name="Swipe Coffee",
+            address="Рязань, район Приокский, Дачная улица, 5",
+            lat=54.6135, lon=39.7237))
+        self.assertFalse(is_new)
+        self.assertEqual(first, second)
+        self.assertEqual(db.stats(self.conn)["total"], 1)
+
+    def test_chain_branches_one_card_with_locations(self) -> None:
+        # Одна сеть — одна карточка, а адреса и телефоны точек внутри неё.
+        first, _ = db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-1", name="Кофе Крафт",
+            address="улица Ленина, 9", phone="+79105780534",
+            lat=54.622778, lon=39.754036))
+        second, is_new = db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-2", name="Кофе Крафт",
+            address="Московское шоссе, 49 к1", phone="+79105780539",
+            lat=54.643847, lon=39.657836))
+        self.assertFalse(is_new)
+        self.assertEqual(first, second)
+        self.assertEqual(db.stats(self.conn)["total"], 1)
+
+        lead = db.get_lead(self.conn, first)
+        self.assertEqual(lead["locations_count"], 2)
+        addresses = {location["address"] for location in lead["locations"]}
+        self.assertEqual(
+            addresses, {"улица Ленина, 9", "Московское шоссе, 49 к1"}
+        )
+        phones = {location["phone"] for location in lead["locations"]}
+        self.assertEqual(phones, {"+79105780534", "+79105780539"})
+
+    def test_shared_toll_free_number_not_enough(self) -> None:
+        # 8-800 один на всю сеть: по нему нельзя склеивать разные точки,
+        # если у них даже название родовое.
+        db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-1", name="Кофейня",
+            address="улица Ленина, 51", phone="8 800 333-41-30",
+            lat=54.628495, lon=39.744938))
+        second, is_new = db.upsert_place(self.conn, self.place(
+            source="yandex", source_id="y-1", name="Кофейня",
+            address="Рязань, улица Гагарина, 74", phone="8 800 333-41-30",
+            lat=54.614525, lon=39.723335))
+        self.assertTrue(is_new)
+        self.assertEqual(db.stats(self.conn)["total"], 2)
+
+    def test_scraped_garbage_phone_ignored(self) -> None:
+        # 2ГИС иногда склеивает 8-800 и добавочный: 18 цифр — не телефон.
+        self.assertEqual(db.normalize_phone("+880033341309001800"), "")
+
+    def test_merge_existing_duplicates_keeps_work(self) -> None:
+        keeper, _ = db.upsert_place(self.conn, self.place())
+        db.set_status(self.conn, keeper, status="called", is_favorite=True,
+                      note="перезвонить")
+
+        place = self.place(
+            source="2gis", source_id="2g-1", phone="",
+            name="Кофейня  Ромашка", address="Ленина 1",
+        )
+        keys = db._keys_for(place)
+        duplicate_id = "dup-2gis-1"
+        self.conn.execute(
+            """INSERT INTO business (id, source, source_id, name, address, lat, lon,
+                   phone, phone_norm, website, status, is_favorite, note, is_demo,
+                   first_seen, updated_at, name_key, compact_key, address_key,
+                   phone_keys, site_key)
+               VALUES (?,?,?,?,?,?,?,?,?,?, 'new', 0, '', 0, ?, ?, ?,?,?,?,?)""",
+            (
+                duplicate_id, place.source, place.source_id, place.name,
+                place.address, place.lat, place.lon, place.phone, "", "",
+                db.now(), db.now(), keys["name_key"], keys["compact_key"],
+                keys["address_key"], keys["phone_keys"], keys["site_key"],
+            ),
+        )
+        db._link_source(self.conn, duplicate_id, place)
+        self.conn.commit()
+        self.assertEqual(db.stats(self.conn)["total"], 2)
+
+        groups = db.find_duplicate_groups(self.conn)
+        self.assertEqual(len(groups), 1)
+
+        removed = db.merge_duplicate_groups(self.conn)
+        self.assertEqual(removed, 1)
+        self.assertEqual(db.stats(self.conn)["total"], 1)
+
+        lead = db.get_lead(self.conn, keeper)
+        self.assertEqual(lead["status"], "called")
+        self.assertEqual(lead["is_favorite"], 1)
+        self.assertIn("перезвонить", lead["note"])
+        self.assertEqual(set(lead["sources"]), {"google", "2gis"})
 
     def test_far_places_not_merged(self) -> None:
         db.upsert_place(self.conn, self.place(phone="", source_id="g-1"))
         second, is_new = db.upsert_place(
             self.conn,
             self.place(source="yandex", source_id="y-1", phone="", lat=57.2500,
-                       lon=65.5300),
+                       lon=65.5300, address="ул. Свободы, 40",
+                       name="Пекарня Лютик"),
         )
         self.assertTrue(is_new)
         self.assertEqual(db.stats(self.conn)["total"], 2)
