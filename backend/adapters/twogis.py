@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import urllib.error
@@ -52,13 +53,102 @@ from .base import (
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TWOGIS_DIR = (
-    r"C:\Users\Hlusha\Desktop\qwerty\parsers\02-2gis-parser-eroloft"
-)
-DEFAULT_CHROMIUM = (
-    r"C:\Users\Hlusha\AppData\Local\ms-playwright"
-    r"\chromium-1228\chrome-win64\chrome.exe"
-)
+# Корень проекта (папка PARSER). Парсеры ищутся рядом с ним, без привязки
+# к имени пользователя или букве диска.
+ROOT = Path(__file__).resolve().parents[2]
+_TWOGIS_SUBDIR = Path("parsers") / "02-2gis-parser-eroloft"
+
+
+def _default_twogis_dir() -> Path:
+    """Найти папку браузерного парсера 2ГИС рядом со скопированным проектом.
+
+    Порядок: ``qwerty/parsers`` (исходная раскладка) →
+    ``PARSER/parsers`` (переносимая раскладка).
+    """
+    for candidate in (ROOT.parent / _TWOGIS_SUBDIR, ROOT / _TWOGIS_SUBDIR):
+        if candidate.is_dir():
+            return candidate
+    # Ничего не нашли: путь остаётся подсказкой в тексте ошибки.
+    return ROOT.parent / _TWOGIS_SUBDIR
+
+
+def _venv_python(directory: Path) -> Path:
+    """Интерпретатор виртуального окружения парсера под текущую ОС."""
+    if os.name == "nt":
+        return directory / ".venv" / "Scripts" / "python.exe"
+    return directory / ".venv" / "bin" / "python"
+
+
+def _resolve_python(directory: Path, env_var: str) -> Path | None:
+    """Python парсера: env-переопределение → venv → ``python3``/``python``."""
+    raw = os.getenv(env_var, "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    venv = _venv_python(directory)
+    if venv.is_file():
+        return venv
+    # На Windows ``python3`` часто оказывается заглушкой Microsoft Store,
+    # поэтому сначала пробуем ``python``.
+    names = ("python", "python3") if os.name == "nt" else ("python3", "python")
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
+def _playwright_chromium() -> Path | None:
+    """Найти Chromium, скачанный Playwright, под текущую ОС.
+
+    Берётся самая свежая (наибольшая) ревизия ``chromium-<номер>``.
+    """
+    if sys.platform == "win32":
+        base = Path(
+            os.getenv("LOCALAPPDATA", "").strip()
+            or Path.home() / "AppData" / "Local"
+        ) / "ms-playwright"
+        rels = ("chrome-win64/chrome.exe", "chrome-win/chrome.exe")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches" / "ms-playwright"
+        rels = ("chrome-mac/Chromium.app/Contents/MacOS/Chromium",)
+    else:
+        base = Path.home() / ".cache" / "ms-playwright"
+        rels = ("chrome-linux/chrome", "chrome-linux64/chrome")
+
+    if not base.is_dir():
+        return None
+
+    revisions: list[tuple[int, Path]] = []
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        match = re.fullmatch(r"chromium-(\d+)", entry.name)
+        if match is not None:
+            revisions.append((int(match.group(1)), entry))
+    revisions.sort(key=lambda item: item[0], reverse=True)
+
+    for _, directory in revisions:
+        for relative in rels:
+            candidate = directory / relative
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _resolve_chromium(explicit: str | Path | None = None) -> Path | None:
+    """Chromium: env-переопределение → явный аргумент → поиск Playwright."""
+    raw = os.getenv("TWOGIS_CHROME", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    if explicit:
+        return Path(explicit)
+    return _playwright_chromium()
+
+
+DEFAULT_TWOGIS_DIR = _default_twogis_dir()
+DEFAULT_CHROMIUM = _resolve_chromium()
 
 CACHE_TTL = 600.0  # 10 минут
 API_PAGE_SIZE = 50
@@ -116,12 +206,11 @@ class TwoGisAdapter(Adapter):
         self.city = (
             city if city is not None else os.getenv("TWOGIS_CITY", "")
         ).strip()
-        self.directory = path_from_env(
-            "TWOGIS_DIR", directory or DEFAULT_TWOGIS_DIR,
+        default_dir = (
+            directory if directory is not None else _default_twogis_dir()
         )
-        self.chromium = path_from_env(
-            "TWOGIS_CHROME", chromium or DEFAULT_CHROMIUM,
-        )
+        self.directory = path_from_env("TWOGIS_DIR", default_dir)
+        self.chromium = _resolve_chromium(chromium)
         self.api_key = os.getenv("TWOGIS_API_KEY", "").strip()
         raw_timeout = os.getenv("TWOGIS_TIMEOUT", "280").strip()
         try:
@@ -146,8 +235,9 @@ class TwoGisAdapter(Adapter):
 
     @property
     def python_exe(self) -> Path:
-        """Интерпретатор виртуального окружения парсера."""
-        return self.directory / ".venv" / "Scripts" / "python.exe"
+        """Интерпретатор парсера: TWOGIS_PYTHON, venv или Python из PATH."""
+        exe = _resolve_python(self.directory, "TWOGIS_PYTHON")
+        return exe if exe is not None else _venv_python(self.directory)
 
     @property
     def script(self) -> Path:
@@ -163,12 +253,15 @@ class TwoGisAdapter(Adapter):
     def _browser_available(self) -> tuple[bool, str]:
         """Проверить компоненты браузерного режима."""
         problems: list[str] = []
-        if not self.python_exe.is_file():
-            problems.append(f"не найден интерпретатор: {self.python_exe}")
+        python_exe = self.python_exe
+        if not python_exe.is_file():
+            problems.append(f"не найден Python парсера (TWOGIS_PYTHON): {python_exe}")
         if not self.script.is_file():
-            problems.append(f"не найден parser-2gis.py: {self.script}")
-        if not self.chromium.is_file():
-            problems.append(f"не найден Chromium: {self.chromium}")
+            problems.append(f"не найден parser-2gis.py (TWOGIS_DIR): {self.script}")
+        if self.chromium is None:
+            problems.append("не найден Chromium (задайте TWOGIS_CHROME)")
+        elif not self.chromium.is_file():
+            problems.append(f"не найден Chromium (TWOGIS_CHROME): {self.chromium}")
         if problems:
             return False, "; ".join(problems)
         return True, ""

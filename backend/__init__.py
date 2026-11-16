@@ -25,9 +25,22 @@ def load_env(path: Path | None = None) -> None:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, _, value = line.partition("=")
+        key, _, raw = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        value = raw.strip()
+        # Значение в кавычках может содержать #; без кавычек # после пробела —
+        # это комментарий, а не часть пути или ключа.
+        if value[:1] in ("'", '"'):
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end != -1 else value[1:]
+        else:
+            for marker in (" #", "\t#"):
+                if marker in value:
+                    value = value.split(marker, 1)[0]
+            value = value.strip()
         if key and key not in os.environ:
             os.environ[key] = value
 

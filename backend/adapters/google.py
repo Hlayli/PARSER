@@ -38,10 +38,30 @@ from .base import (
 
 log = logging.getLogger(__name__)
 
-DEFAULT_GMSC_PATH = (
-    r"C:\Users\Hlusha\Desktop\qwerty\parsers"
-    r"\01-gosom-google-maps-scraper\gmsc.exe"
-)
+# Корень проекта (папка PARSER). Парсеры ищутся рядом с ним, без привязки
+# к имени пользователя или букве диска.
+ROOT = Path(__file__).resolve().parents[2]
+_GMSC_SUBDIR = Path("parsers") / "01-gosom-google-maps-scraper" / "gmsc.exe"
+
+
+def _default_gmsc_path() -> Path:
+    """Найти gmsc.exe в PATH или рядом со скопированным проектом.
+
+    Порядок: PATH → ``qwerty/parsers`` (исходная раскладка) →
+    ``PARSER/parsers`` (переносимая раскладка).
+    """
+    for name in ("gmsc", "gmsc.exe"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    for candidate in (ROOT.parent / _GMSC_SUBDIR, ROOT / _GMSC_SUBDIR):
+        if candidate.is_file():
+            return candidate
+    # Ничего не нашли: путь остаётся подсказкой в тексте ошибки.
+    return ROOT.parent / _GMSC_SUBDIR
+
+
+DEFAULT_GMSC_PATH = _default_gmsc_path()
 
 # Поля, которые могут быть очень большими и не нужны в payload.
 _HEAVY_FIELDS = {"images", "user_reviews", "user_reviews_extended"}
@@ -55,12 +75,13 @@ class GoogleAdapter(Adapter):
     supports_bbox = True
 
     def __init__(self, binary: str | Path | None = None) -> None:
-        self.binary = path_from_env("GMSC_PATH", binary or DEFAULT_GMSC_PATH)
+        default = binary if binary is not None else _default_gmsc_path()
+        self.binary = path_from_env("GMSC_PATH", default)
 
     def available(self) -> tuple[bool, str]:
         """Проверить наличие gmsc.exe."""
         if not self.binary.is_file():
-            return False, f"не найден gmsc.exe: {self.binary}"
+            return False, f"не найден gmsc.exe (GMSC_PATH): {self.binary}"
         return True, ""
 
     async def search(self, query: str, bbox: BBox, limit: int = 60) -> list[Place]:

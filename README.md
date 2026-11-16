@@ -47,29 +47,127 @@ PARSER собирает организации из карт и справочн
 
 ## Установка
 
-Python 3.14, FastAPI, uvicorn, httpx, BeautifulSoup4, stdlib `sqlite3`.
-Без SQLAlchemy, без npm и сборки.
+Нужен только Python: без SQLAlchemy, без npm, без сборки и Docker.
+
+| Что | Требование |
+|---|---|
+| Python | **3.10+** (автор проверяет на 3.14) |
+| ОС | Windows 10/11, macOS, Linux |
+| Интернет | только для первой установки зависимостей |
+| Внешние парсеры Google/Яндекс/2ГИС | не обязательны: без них работает демо-режим |
+
+Порядок на чистой машине:
+
+1. Установите Python 3.10 или новее с https://www.python.org/downloads/.
+   На Windows при установке отметьте галочку **Add python.exe to PATH**.
+2. Распакуйте папку `PARSER` целиком. Путь с пробелами и кириллицей
+   допустим: лаунчеры сами переходят в свою папку.
+3. Запустите лаунчер (`run.bat` на Windows, `bash run.sh` на macOS/Linux).
+   При первом запуске он проверит зависимости и при необходимости выполнит
+   `pip install -r requirements.txt`.
+4. Дождитесь в консоли строки `Uvicorn running on http://127.0.0.1:8777`.
+5. Откройте показанный адрес. Windows-лаунчер открывает браузер сам;
+   проверка сервера — `http://127.0.0.1:8777/api/health`.
+
+Виртуальное окружение не обязательно, но удобно: если рядом есть `.venv`,
+лаунчеры используют его автоматически.
+
+Windows:
 
 ```bat
-cd PARSER
-python -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+macOS/Linux:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Активация не нужна, если вызывать интерпретатор напрямую:
+`.venv\Scripts\python.exe -m pip ...` (Windows) или
+`.venv/bin/python -m pip ...` (macOS/Linux). В PowerShell окружение
+активируется через `.venv\Scripts\Activate.ps1`.
 
 Переменные окружения можно задать в `.env` (читается при старте) или в системе.
 
 ## Запуск
 
-```bat
-run.bat          :: реальные источники
-run_demo.bat     :: демо-режим
-```
+| ОС | Обычный режим | Демо-режим |
+|---|---|---|
+| Windows | `run.bat` | `run_demo.bat` |
+| macOS/Linux | `bash run.sh` | `bash run.sh --demo` |
 
-Без bat-файла: `python -m backend` или
+Демо-режим (`PARSER_DEMO=1`) добавляет источник `demo`: приложение
+открывается и работает без внешних парсеров, записи помечены «ДЕМО».
+База по умолчанию одна и та же — `data/parser.db`; путь переопределяется
+`PARSER_DB`.
+
+Лаунчеры сами выбирают интерпретатор: `.venv\Scripts\python.exe` (Windows)
+или `.venv/bin/python` (macOS/Linux), иначе `python3`/`python`, а
+`run.bat` / `run_demo.bat` — ещё и `py -3`; сломанные заглушки пропускаются.
+Если зависимостей нет, они ставятся из `requirements.txt`. Порт и адрес
+берутся из `PARSER_PORT` / `PARSER_HOST` (по умолчанию `127.0.0.1:8777`) или
+из `.env`; `python -m backend` читает те же переменные.
+
+Без лаунчеров: `python -m backend` или
 `python -m uvicorn backend.app:app --host 127.0.0.1 --port 8777`.
 `run.bat` открывает `http://127.0.0.1:8777`; `python -m backend.app` сам сервер
 не запускает — используйте `python -m backend`.
+
+## Что отправить другу
+
+Отправляйте всю папку `PARSER` целиком, но **не** отправляйте:
+
+- `.venv` — окружение привязано к машине и версии Python; на новом ПК
+  лаунчер возьмёт системный Python и поставит зависимости;
+- `__pycache__` и `*.pyc` — кэш байткода;
+- `.git` — история репозитория, если она не нужна;
+- `.env` — там могут быть личные пути и ключи; вместо него отправьте
+  `.env.example`.
+
+`data/` тоже лучше не отправлять: пустая база `data/parser.db` создаётся при
+первом запуске. Если базу нужно перенести, сначала остановите сервер
+(Ctrl+C), затем копируйте `parser.db`, `parser.db-wal` и `parser.db-shm`
+вместе — иначе последние записи потеряются.
+
+Внешние парсеры из `parsers/` нужны только для реальных источников; для демо
+их можно не отправлять.
+
+## Если ничего не открылось
+
+1. **Окно закрылось сразу или «python не найден».** Python не установлен
+   либо не добавлен в PATH. Установите 3.10+ с python.org, отметьте
+   «Add python.exe to PATH», откройте новое окно cmd и проверьте
+   `python --version` или `py -3 --version`.
+2. **`ModuleNotFoundError: No module named ...`** Лаунчер не смог поставить
+   зависимости. Установите вручную:
+   Windows — `.venv\Scripts\python.exe -m pip install -r requirements.txt`
+   (или `py -3 -m pip install -r requirements.txt`);
+   macOS/Linux — `.venv/bin/python -m pip install -r requirements.txt`
+   (или `python3 -m pip install -r requirements.txt`). Частая причина — нет
+   интернета или мешает прокси.
+3. **Порт 8777 занят** (`address already in use`, `[Errno 10048]`). Задайте
+   другой порт в `.env` (`PARSER_PORT=8788`) или в командной строке:
+   `set PARSER_PORT=8788` перед `run.bat` (Windows),
+   `PARSER_PORT=8788 bash run.sh` (macOS/Linux). Кто занял порт:
+   `netstat -ano | findstr :8777` (Windows).
+4. **Брандмауэр просит разрешение.** Для локальной работы достаточно
+   разрешить доступ в частных сетях. По умолчанию сервер слушает только
+   `127.0.0.1` и из интернета недоступен.
+5. **Источники серые или «недоступен».** Без внешних парсеров это нормально:
+   Google/Яндекс/2ГИС требуют своих утилит. Проверьте пути в `.env`
+   (`GMSC_PATH`, `YAMAPS_DIR`, `TWOGIS_DIR`) или запустите демо-режим.
+6. **Проверка сервера.** Откройте `http://127.0.0.1:8777/api/health` —
+   должен вернуться JSON с `"ok": true`, списком адаптеров и причиной
+   недоступности каждого. В консоли должна быть строка
+   `Uvicorn running on ...`.
+7. **Браузер не открылся сам.** Откройте адрес из консоли вручную;
+   на macOS/Linux лаунчер браузер не запускает.
 
 ## Открыть в облаке (GitHub Codespaces)
 
@@ -101,24 +199,29 @@ GitHub можно в Codespaces:
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `PARSER_DEMO` | `0` | `1` — добавить источник `demo` (записи помечаются «ДЕМО») |
-| `GMSC_PATH` | — | путь к `gmsc.exe` (gosom/google-maps-scraper) |
+| `PARSER_DEMO` | `0` | `1` — добавить источник `demo` (записи помечаются «ДЕМО»); другие значения выключают демо |
+| `GMSC_PATH` | автопоиск | путь к `gmsc.exe` (gosom/google-maps-scraper); ищется в PATH и в `parsers/` рядом с PARSER |
 | `GMSC_DEPTH` | `2` | глубина прокрутки выдачи Google (1–10) |
 | `GMSC_RADIUS` | по ячейке | радиус Google в метрах; по умолчанию считается по размеру квадрата |
-| `YAMAPS_DIR` | — | папка с `yamaps_parser` |
-| `TWOGIS_DIR` | — | папка с браузерным парсером 2ГИС |
+| `YAMAPS_DIR` | автопоиск | папка с `yamaps_parser`; ищется в `parsers/` рядом с PARSER |
+| `YAMAPS_PYTHON` | `.venv` парсера | Python для Яндекс-парсера, если он не в `.venv` и не в PATH |
+| `TWOGIS_DIR` | автопоиск | папка с браузерным парсером 2ГИС; ищется в `parsers/` рядом с PARSER |
+| `TWOGIS_PYTHON` | `.venv` парсера | Python для 2ГИС-парсера, если он не в `.venv` и не в PATH |
+| `TWOGIS_CHROME` | Chromium Playwright | путь к Chromium/Chrome для браузерного 2ГИС |
 | `TWOGIS_API_KEY` | — | ключ официального API 2ГИС; без него — браузерный режим |
-| `TWOGIS_CITY` | `tyumen` | город для браузерного 2ГИС, если в запросе не указан `city` |
+| `TWOGIS_CITY` | — (город из запроса) | город для браузерного 2ГИС, если в запросе не указан `city` |
 | `TWOGIS_MAX_RECORDS` | `500` | максимум записей за один прогон 2ГИС |
 | `TWOGIS_TIMEOUT` | `280` | таймаут браузерного 2ГИС, секунд |
 | `PARSER_DB` | `data/parser.db` | путь к файлу SQLite |
-| `PARSER_PORT` | `8777` | порт для `python -m backend` |
+| `PARSER_PORT` | `8777` | порт сервера для `run.bat`, `run.sh` и `python -m backend` |
+| `PARSER_HOST` | `127.0.0.1` | адрес для `run.bat`, `run.sh` и `python -m backend` |
 
 Ключи платных API не обязательны: без них источник помечается недоступным.
 
 ## Быстрый старт
 
-1. Запустите `run_demo.bat` или `run.bat` и откройте `http://127.0.0.1:8777`.
+1. Запустите `run_demo.bat` / `run.bat` (Windows) или `bash run.sh --demo` /
+   `bash run.sh` (macOS/Linux) и откройте `http://127.0.0.1:8777`.
 2. Нажмите «Что ищем» и включите нужные ниши: по умолчанию выбраны
    стоматологии, шиномонтаж и кофейни. Можно нажать «Хиты», «Все» или
    «Сбросить», найти нишу поиском либо добавить свой запрос в поле ниже.
@@ -290,7 +393,7 @@ PARSER/
 ├── docs/                 RESEARCH.md, DATA_INTEGRITY.md
 ├── data/                 parser.db (создаётся при запуске)
 ├── requirements.txt
-├── run.bat / run_demo.bat
+├── run.bat / run_demo.bat / run.sh
 ├── .env.example
 └── CONTRACT.md           обязательный интерфейс
 ```

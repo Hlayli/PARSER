@@ -2,7 +2,7 @@
 
 Любой агент обязан следовать этому файлу. Не менять чужие файлы. Не менять сигнатуры.
 
-Стек: Python 3.14, FastAPI, uvicorn, httpx, beautifulsoup4, stdlib sqlite3. Без SQLAlchemy, без npm/сборки.
+Стек: Python 3.10+ (автор проверяет на 3.14), FastAPI, uvicorn, httpx, beautifulsoup4, stdlib sqlite3. Без SQLAlchemy, без npm/сборки.
 
 ---
 

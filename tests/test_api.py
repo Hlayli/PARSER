@@ -26,7 +26,8 @@ from backend.app import app  # noqa: E402
 def clear_db() -> None:
     db.init_db()
     with db.connect() as conn:
-        for table in ("fact", "business_source", "business", "scan_cell", "scan_job"):
+        for table in ("fact", "business_source", "business_location", "business",
+                      "scan_cell", "scan_job"):
             conn.execute(f"DELETE FROM {table}")
         conn.commit()
 

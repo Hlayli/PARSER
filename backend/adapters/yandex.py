@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -33,9 +34,51 @@ from .base import (
 
 log = logging.getLogger(__name__)
 
-DEFAULT_YAMAPS_DIR = (
-    r"C:\Users\Hlusha\Desktop\qwerty\parsers\03-yandex-maps-parser"
-)
+# Корень проекта (папка PARSER). Парсеры ищутся рядом с ним, без привязки
+# к имени пользователя или букве диска.
+ROOT = Path(__file__).resolve().parents[2]
+_YAMAPS_SUBDIR = Path("parsers") / "03-yandex-maps-parser"
+
+
+def _default_yamaps_dir() -> Path:
+    """Найти папку парсера Яндекс.Карт рядом со скопированным проектом.
+
+    Порядок: ``qwerty/parsers`` (исходная раскладка) →
+    ``PARSER/parsers`` (переносимая раскладка).
+    """
+    for candidate in (ROOT.parent / _YAMAPS_SUBDIR, ROOT / _YAMAPS_SUBDIR):
+        if candidate.is_dir():
+            return candidate
+    # Ничего не нашли: путь остаётся подсказкой в тексте ошибки.
+    return ROOT.parent / _YAMAPS_SUBDIR
+
+
+DEFAULT_YAMAPS_DIR = _default_yamaps_dir()
+
+
+def _venv_python(directory: Path) -> Path:
+    """Интерпретатор виртуального окружения парсера под текущую ОС."""
+    if os.name == "nt":
+        return directory / ".venv" / "Scripts" / "python.exe"
+    return directory / ".venv" / "bin" / "python"
+
+
+def _resolve_python(directory: Path, env_var: str) -> Path | None:
+    """Python парсера: env-переопределение → venv → ``python3``/``python``."""
+    raw = os.getenv(env_var, "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    venv = _venv_python(directory)
+    if venv.is_file():
+        return venv
+    # На Windows ``python3`` часто оказывается заглушкой Microsoft Store,
+    # поэтому сначала пробуем ``python``.
+    names = ("python", "python3") if os.name == "nt" else ("python3", "python")
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
 
 
 class YandexAdapter(Adapter):
@@ -46,14 +89,14 @@ class YandexAdapter(Adapter):
     supports_bbox = True
 
     def __init__(self, directory: str | Path | None = None) -> None:
-        self.directory = path_from_env(
-            "YAMAPS_DIR", directory or DEFAULT_YAMAPS_DIR,
-        )
+        default = directory if directory is not None else _default_yamaps_dir()
+        self.directory = path_from_env("YAMAPS_DIR", default)
 
     @property
     def python_exe(self) -> Path:
-        """Интерпретатор виртуального окружения парсера."""
-        return self.directory / ".venv" / "Scripts" / "python.exe"
+        """Интерпретатор парсера: YAMAPS_PYTHON, venv или Python из PATH."""
+        exe = _resolve_python(self.directory, "YAMAPS_PYTHON")
+        return exe if exe is not None else _venv_python(self.directory)
 
     @property
     def script(self) -> Path:
@@ -61,12 +104,13 @@ class YandexAdapter(Adapter):
         return self.directory / "yamaps_parser.py"
 
     def available(self) -> tuple[bool, str]:
-        """Проверить наличие venv и скрипта парсера."""
+        """Проверить наличие интерпретатора и скрипта парсера."""
         problems: list[str] = []
-        if not self.python_exe.is_file():
-            problems.append(f"не найден интерпретатор: {self.python_exe}")
+        python_exe = self.python_exe
+        if not python_exe.is_file():
+            problems.append(f"не найден Python парсера (YAMAPS_PYTHON): {python_exe}")
         if not self.script.is_file():
-            problems.append(f"не найден yamaps_parser.py: {self.script}")
+            problems.append(f"не найден yamaps_parser.py (YAMAPS_DIR): {self.script}")
         if problems:
             return False, "; ".join(problems)
         return True, ""

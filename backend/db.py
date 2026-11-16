@@ -18,7 +18,24 @@ from pathlib import Path
 from . import dedup
 from .models import Place
 
-DB_PATH = Path(os.environ.get("PARSER_DB", Path(__file__).resolve().parent.parent / "data" / "parser.db"))
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _db_path() -> Path:
+    """Путь к базе: PARSER_DB или data/parser.db внутри проекта.
+
+    Относительный PARSER_DB считается от папки проекта, а не от текущего
+    каталога запуска: ``PARSER_DB=data/leads.db`` одинаково работает из
+    ``run.bat``, из любого каталога и из IDE.
+    """
+    raw = os.environ.get("PARSER_DB", "").strip()
+    if not raw:
+        return ROOT / "data" / "parser.db"
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+DB_PATH = _db_path()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS business (
