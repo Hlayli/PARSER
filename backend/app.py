@@ -203,13 +203,15 @@ async def leads(
     source: str | None = None,
     q: str | None = None,
     fav: bool = False,
+    site: str | None = None,
     sort: str = "new",
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict:
     with db.connect() as conn:
         total, items = db.list_leads(conn, status=status, source=source, q=q,
-                                     fav=fav, sort=sort, limit=limit, offset=offset)
+                                     fav=fav, site=site, sort=sort,
+                                     limit=limit, offset=offset)
     return {"total": total, "items": items}
 
 
@@ -242,6 +244,7 @@ async def export_csv(
     source: str | None = None,
     q: str | None = None,
     fav: bool = False,
+    site: str | None = None,
 ) -> Response:
     import csv
     import io
@@ -251,7 +254,8 @@ async def export_csv(
         offset = 0
         while True:
             total, items = db.list_leads(conn, status=status, source=source, q=q,
-                                         fav=fav, sort="name", limit=500, offset=offset)
+                                         fav=fav, site=site, sort="name",
+                                         limit=500, offset=offset)
             all_items.extend(items)
             offset += len(items)
             if not items or offset >= total:

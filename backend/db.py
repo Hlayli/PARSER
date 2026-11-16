@@ -539,6 +539,7 @@ def list_leads(
     source: str | None = None,
     q: str | None = None,
     fav: bool = False,
+    site: str | None = None,
     sort: str = "new",
     limit: int = 50,
     offset: int = 0,
@@ -549,6 +550,10 @@ def list_leads(
         params.append(status)
     if fav:
         where.append("b.is_favorite = 1")
+    if site == "no":
+        where.append("b.website = ''")
+    elif site == "yes":
+        where.append("b.website != ''")
     if q:
         where.append(
             "(lower_ru(b.name) LIKE ? OR lower_ru(b.address) LIKE ? "

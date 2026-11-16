@@ -315,6 +315,17 @@ class DbTestCase(unittest.TestCase):
         self.assertEqual(total, 1)
         self.assertEqual(items[0]["id"], second)
 
+        third, _ = db.upsert_place(self.conn, self.place(
+            source="2gis", source_id="2g-1", name="Кофейня без сайта",
+            phone="", website="", lat=57.3, lon=65.7))
+
+        total, items = db.list_leads(self.conn, site="no")
+        self.assertEqual(total, 1)
+        self.assertEqual(items[0]["id"], third)
+
+        total, items = db.list_leads(self.conn, site="yes")
+        self.assertEqual(total, 2)
+
     def test_phone_normalization(self) -> None:
         self.assertEqual(db.normalize_phone("8 (900) 111-22-33"), "+79001112233")
         self.assertEqual(db.normalize_phone("+7 900 111 22 33"), "+79001112233")

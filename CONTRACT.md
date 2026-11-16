@@ -208,7 +208,7 @@ SCANNER: ScanManager   # глобальный синглтон
 | POST | `/api/jobs/{id}/pause` | — | `{ok}` |
 | POST | `/api/jobs/{id}/resume` | — | `{ok}` |
 | POST | `/api/jobs/{id}/stop` | — | `{ok}` |
-| GET | `/api/leads` | `status, source, q, fav, sort, limit, offset` | `{total, items:[...]}` |
+| GET | `/api/leads` | `status, source, q, fav, site=no\|yes, sort, limit, offset` | `{total, items:[...]}` |
 | GET | `/api/leads/{id}` | — | полная карточка + `facts`, `sources`, `locations` |
 | PATCH | `/api/leads/{id}` | `{status?, is_favorite?, note?}` | `{ok, lead}` |
 | POST | `/api/leads/{id}/enrich` | — | `{added:{...}, errors:[], lead:{...}}` |

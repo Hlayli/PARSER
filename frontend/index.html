@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>PARSER — поиск и обзвон бизнеса</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261115a">
+  <link rel="stylesheet" href="/static/styles.css?v=20261116a">
 </head>
 <body>
   <a class="skip-link" href="#lead-list">Перейти к списку лидов</a>
@@ -165,6 +165,15 @@
             </label>
 
             <label class="filter-control">
+              <span class="sr-only">Сайт</span>
+              <select id="filter-site" aria-label="Фильтр по наличию сайта">
+                <option value="">Все сайты</option>
+                <option value="no">Без сайта</option>
+                <option value="yes">С сайтом</option>
+              </select>
+            </label>
+
+            <label class="filter-control">
               <span class="sr-only">Сортировка</span>
               <select id="filter-sort" aria-label="Сортировка лидов">
                 <option value="newest">Сначала новые</option>
@@ -281,6 +290,6 @@
   <div class="cell-tooltip" id="cell-tooltip" hidden></div>
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="/static/app.js?v=20261115a" defer></script>
+  <script src="/static/app.js?v=20261116a" defer></script>
 </body>
 </html>

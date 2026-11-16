@@ -21,7 +21,7 @@ const state = {
   leads: [],
   total: 0,
   limit: 50,
-  filters: { q: '', status: '', sort: 'newest', fav: false },
+  filters: { q: '', status: '', sort: 'newest', fav: false, site: '' },
   selectedId: null,
   jobId: null,
   grid: { nx: 0, ny: 0 },
@@ -698,6 +698,8 @@ function leadMatchesFilters(lead) {
   const f = state.filters;
   if (f.status && lead.status !== f.status) return false;
   if (f.fav && !lead.is_favorite) return false;
+  if (f.site === 'no' && lead.has_site) return false;
+  if (f.site === 'yes' && !lead.has_site) return false;
   if (f.q) {
     const haystack = [lead.name, lead.address, lead.phone, lead.category]
       .join(' ')
@@ -712,6 +714,7 @@ async function loadLeads(reset = true) {
   if (state.filters.q) params.set('q', state.filters.q);
   if (state.filters.status) params.set('status', state.filters.status);
   if (state.filters.fav) params.set('fav', 'true');
+  if (state.filters.site) params.set('site', state.filters.site);
   params.set('sort', SORT_MAP[state.filters.sort] || 'new');
   params.set('limit', String(state.limit));
   params.set('offset', reset ? '0' : String(state.leads.length));
@@ -761,7 +764,7 @@ function renderLeads() {
 
 function hasActiveFilters() {
   const f = state.filters;
-  return Boolean(f.q || f.status || f.fav);
+  return Boolean(f.q || f.status || f.fav || f.site);
 }
 
 // Перезагрузка списка с задержкой: при потоке новых лидов и сортировке
@@ -1315,6 +1318,11 @@ function initFilters() {
     loadLeads(true);
   });
 
+  $('#filter-site').addEventListener('change', (event) => {
+    state.filters.site = event.target.value;
+    loadLeads(true);
+  });
+
   $('#filter-fav').addEventListener('change', (event) => {
     state.filters.fav = event.target.checked;
     loadLeads(true);
@@ -1326,11 +1334,12 @@ function initFilters() {
 }
 
 function resetFilters() {
-  state.filters = { q: '', status: '', sort: 'newest', fav: false };
+  state.filters = { q: '', status: '', sort: 'newest', fav: false, site: '' };
   $('#filter-q').value = '';
   $('#filter-status').value = '';
   $('#filter-sort').value = 'newest';
   $('#filter-fav').checked = false;
+  $('#filter-site').value = '';
   $('#filter-clear').hidden = true;
   loadLeads(true);
 }
