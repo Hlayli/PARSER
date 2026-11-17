@@ -959,6 +959,22 @@ function renderDetail(lead) {
     (location) => location.address || location.phone,
   );
 
+  // В business_source хранится по записи на каждую точку/скан. В блоке
+  // «Источники» показываем каждый источник один раз, а не N одинаковых плашек.
+  const sourceLinks = [];
+  const seenSources = new Set();
+  for (const item of lead.source_links || []) {
+    const source = item.source || '';
+    if (seenSources.has(source)) continue;
+    seenSources.add(source);
+    sourceLinks.push(item);
+  }
+  if (!sourceLinks.length) {
+    for (const source of lead.sources || [lead.source]) {
+      sourceLinks.push({ source, url: '' });
+    }
+  }
+
   const badges = [];
   if (lead.is_demo) badges.push('<span class="badge badge--demo">ДЕМО</span>');
   for (const source of lead.sources || [lead.source]) {
@@ -1095,7 +1111,7 @@ function renderDetail(lead) {
     <section class="detail-section">
       <h3 class="detail-section-title">Источники</h3>
       <div class="source-chips">
-        ${(lead.source_links || []).map((item) => item.url
+        ${sourceLinks.map((item) => item.url
           ? `<a class="source-chip" href="${escapeHtml(safeUrl(item.url) || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(SOURCE_LABELS[item.source] || item.source)}</a>`
           : `<span class="source-chip">${escapeHtml(SOURCE_LABELS[item.source] || item.source)}</span>`).join('')}
       </div>
