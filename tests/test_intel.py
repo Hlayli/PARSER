@@ -48,11 +48,20 @@ def make_lead(**overrides) -> dict:
 def check_pitch_shape(test: unittest.TestCase, pitch: str) -> None:
     test.assertTrue(pitch.startswith("Здравствуйте!"))
     test.assertTrue(pitch.endswith("?"))
-    test.assertGreaterEqual(len(pitch), 400)
-    test.assertLessEqual(len(pitch), 900)
+    test.assertGreaterEqual(len(pitch), 300)
+    test.assertLessEqual(len(pitch), 750)
     test.assertNotIn("[", pitch)
     test.assertNotIn("ai", pitch.lower())
     test.assertNotIn("гарант", pitch.lower())
+    for phrase in (
+        "предлагаю вариант",
+        "внутри —",
+        "когда можно созвониться",
+        "пишу по карточке",
+        "10–15 минут",
+        "могу показать, как это выглядит",
+    ):
+        test.assertNotIn(phrase, pitch.lower())
 
 
 class NoSiteChainTestCase(unittest.TestCase):
@@ -76,6 +85,23 @@ class NoSiteChainTestCase(unittest.TestCase):
         self.assertEqual(
             contacts["whatsapp"]["href"], "https://wa.me/79001112233"
         )
+        check_pitch_shape(self, intel["pitch"])
+
+    def test_vending_machines_are_food_not_auto(self) -> None:
+        lead = make_lead(
+            name="Essence Coffee",
+            category="Кофейные автоматы",
+            website="",
+            rating=5.0,
+            reviews_count=1,
+        )
+        intel = build_intel(lead)
+
+        self.assertEqual(
+            intel["offer"]["title"],
+            "Сайт с меню, адресами и онлайн-заказом",
+        )
+        self.assertIn("кофеен", intel["pitch"])
         check_pitch_shape(self, intel["pitch"])
 
     def test_no_site_summary_and_site_block(self) -> None:

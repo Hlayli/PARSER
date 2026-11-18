@@ -34,8 +34,10 @@ OFFER_KEYWORDS = (
     (
         "auto",
         (
-            "авто", "шин", "ремонт", "строй", "мебел", "клининг", "юрист",
-            "бухгал", "недвижим", "сервис",
+            "авто", "автосервис", "автомойк", "автосалон", "автошкол",
+            "автозапчаст", "автотехцентр", "автоэлектрик", "шин", "ремонт",
+            "строй", "мебел", "клининг", "юрист", "бухгал", "недвижим",
+            "сервис",
         ),
     ),
     (
@@ -774,7 +776,7 @@ def _summary(ctx: dict, site: dict, gaps: list[dict]) -> str:
 def _offer_group(text: str) -> str:
     for group, keywords in OFFER_KEYWORDS:
         for keyword in keywords:
-            if keyword in ("бар", "спа", "еда"):
+            if keyword in ("бар", "спа", "еда", "авто"):
                 pattern = rf"(?<![а-яёa-z]){keyword}(?![а-яёa-z])"
                 if re.search(pattern, text):
                     return group
@@ -909,24 +911,134 @@ ISSUE_TEXT = {
     "site_no_menu": "нет раздела с меню или ценами",
 }
 
-PITCH_PADDING = (
-    "Могу показать, как это выглядит на примере вашей сферы.",
-    "Это без обязательств: сначала обсудим задачу и сроки.",
-    "Если тема неинтересна, просто ответьте — больше не буду писать.",
-)
+PITCH_GROUP = {
+    "food": {
+        "what": "меню, цены и адреса точек",
+        "action": "Заказать",
+        "niche": "кофеен и небольших сетей",
+        "offer": "меню с ценами, адреса точек и кнопка WhatsApp",
+    },
+    "beauty": {
+        "what": "услуги, цены и свободное время",
+        "action": "Записаться",
+        "niche": "салонов и мастеров",
+        "offer": "услуги, цены и онлайн-запись",
+    },
+    "auto": {
+        "what": "прайс, примеры работ и расчёт",
+        "action": "Оставить заявку на расчёт",
+        "niche": "сервисов и подрядчиков",
+        "offer": "прайс, примеры работ и форма расчёта",
+    },
+    "retail": {
+        "what": "товары, цены и доставку",
+        "action": "Заказать",
+        "niche": "небольших магазинов",
+        "offer": "каталог с ценами, доставка и оформление заказа",
+    },
+    "default": {
+        "what": "услуги, цены и контакты",
+        "action": "Оставить заявку",
+        "niche": "небольших бизнесов",
+        "offer": "услуги, цены, контакты и форма заявки",
+    },
+}
 
 
-def _site_sentence(ctx: dict, gaps: list[dict]) -> str:
+def _social_name(url: str) -> str:
+    _scheme, host, _url = _split_url(url)
+    if host.endswith("vk.com"):
+        return "ВКонтакте"
+    if host.endswith("t.me") or host.endswith("telegram.me"):
+        return "Telegram"
+    if "instagram" in host:
+        return "Instagram"
+    if host.endswith("ok.ru"):
+        return "Одноклассники"
+    if host.endswith("wa.me") or "whatsapp" in host:
+        return "WhatsApp"
+    if host.endswith("youtube.com"):
+        return "YouTube"
+    return "соцсеть"
+
+
+def _pitch_category(value: str) -> str:
+    text = _text(value)
+    for separator in (";", "|", "•"):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+    return _lower_first(_clip(text, 60))
+
+
+def _pitch_hook(ctx: dict) -> str:
+    """Первая фраза: конкретика, которая доказывает, что карточку открыли."""
+    details: list[str] = []
+    category = _pitch_category(ctx["category"])
+    name_lower = ctx["name"].lower()
+    first_word = category.split()[0] if category else ""
+    if category and first_word not in name_lower:
+        details.append(category)
+    if ctx["points"] > 1:
+        details.append(
+            f"{ctx['points']} {_plural(ctx['points'], 'точка', 'точки', 'точек')}"
+        )
+    if ctx["rating"] is not None:
+        rating = f"рейтинг {_rating(ctx['rating'])}"
+        if ctx["reviews"] is not None:
+            rating += (
+                f" ({ctx['reviews']} "
+                f"{_plural(ctx['reviews'], 'отзыв', 'отзыва', 'отзывов')})"
+            )
+        details.append(rating)
+
+    if ctx["name"]:
+        line = f"Здравствуйте! Увидел «{ctx['name']}» в справочнике"
+    elif details:
+        line = "Здравствуйте! Увидел вашу организацию в справочнике"
+    else:
+        return "Здравствуйте!"
+    if details:
+        line += " — " + ", ".join(details)
+    return line + "."
+
+
+def _pitch_problem(ctx: dict, group: str, gaps: list[dict]) -> str:
+    """Наблюдение и его последствие для клиента, без диагнозов и наездов."""
+    data = PITCH_GROUP[group]
+    what = data["what"]
+    action = data["action"]
+
+    if ctx["social_only"]:
+        return (
+            f"Вместо сайта — только {_social_name(ctx['website'])}. "
+            f"Подписчикам удобно, а новый клиент из поиска не увидит {what}. "
+            "Оставить заявку там тоже неудобно."
+        )
     if not ctx["has_site"]:
-        if ctx["social_only"]:
+        if ctx["points"] >= 2:
             return (
-                "Сайт заменяет страница в соцсети: не все клиенты находят там "
-                "цены и адреса."
+                f"Сайта нет: {what} разбросаны по картам и соцсетям. "
+                f"{action} можно только по телефону или в переписке."
+            )
+        if not ctx["name"] and not ctx["category"]:
+            return (
+                f"В карточке не указан сайт: клиенту из поиска негде "
+                f"посмотреть {what} в одном месте. {action} можно только "
+                "по телефону или в переписке."
             )
         return (
-            "Сайта у вас нет — клиентам приходится искать меню/цены/адреса "
-            "по картам и соцсетям."
+            f"Сайта нет: клиенту из поиска негде посмотреть {what} "
+            f"в одном месте. {action} можно только по телефону или "
+            "в переписке."
         )
+
+    _scheme, host, _url = _split_url(ctx["website"])
+    if any(gap["code"] == "site_unreachable" for gap in gaps):
+        return (
+            f"Сайт {host} сейчас не открывается — вместо {what} клиент "
+            "видит ошибку."
+        )
+
     issues: list[str] = []
     for gap in gaps:
         text = ISSUE_TEXT.get(gap["code"])
@@ -935,36 +1047,59 @@ def _site_sentence(ctx: dict, gaps: list[dict]) -> str:
         if len(issues) == 2:
             break
     if issues:
-        return "Сайт у вас есть, но " + _join_and(issues) + "."
+        return (
+            f"Открыл {host} с телефона: {_join_and(issues)}. "
+            "С телефона это мешает дойти до заявки."
+        )
     return (
-        "Сайт у вас есть — можно проверить, удобно ли с него позвонить "
-        "и оставить заявку."
+        f"Сайт {host} у вас есть — вопрос не в наличии, а в том, "
+        "сколько заявок он приносит."
     )
 
 
-def _intro(ctx: dict) -> str:
-    if ctx["name"]:
-        text = f"Здравствуйте! Пишу по карточке «{ctx['name']}»"
-    else:
-        text = "Здравствуйте! Пишу по вашей карточке в справочнике"
-    details: list[str] = []
-    if ctx["category"] and ctx["category"].lower() != ctx["name"].lower():
-        details.append(_lower_first(ctx["category"]))
-    if ctx["points"] > 1:
-        details.append(
-            f"{ctx['points']} {_plural(ctx['points'], 'точка', 'точки', 'точек')}"
+def _pitch_offer(ctx: dict, group: str, gaps: list[dict]) -> str:
+    data = PITCH_GROUP[group]
+    if not ctx["has_site"] or ctx["social_only"]:
+        offer_line = data["offer"]
+        if group == "food" and ctx["points"] < 2:
+            offer_line = "меню с ценами, адрес и кнопка WhatsApp"
+        return (
+            f"Я делаю сайты для {data['niche']}. Начать можно с одной "
+            f"страницы: {offer_line}."
         )
-    if ctx["rating"] is not None:
-        value = f"рейтинг {_rating(ctx['rating'])}"
-        if ctx["reviews"] is not None:
-            value += (
-                f" ({ctx['reviews']} "
-                f"{_plural(ctx['reviews'], 'отзыв', 'отзыва', 'отзывов')})"
-            )
-        details.append(value)
-    if details:
-        text += " — " + ", ".join(details)
-    return text + "."
+    if any(gap["code"] in ISSUE_TEXT for gap in gaps):
+        return (
+            f"Я делаю сайты для {data['niche']}. Могу переделать главную "
+            f"так, чтобы {data['what']} были на виду, а заявка — в один клик."
+        )
+    return (
+        f"Я делаю сайты для {data['niche']}. Могу посмотреть вашу главную "
+        "и прислать 3 точки, где теряются заявки."
+    )
+
+
+def _pitch_cta(ctx: dict, gaps: list[dict]) -> str:
+    if ctx["has_site"] and any(gap["code"] in ISSUE_TEXT for gap in gaps):
+        return (
+            "Могу прислать короткий разбор, что исправить в первую очередь. "
+            "Прислать?"
+        )
+    if ctx["has_site"]:
+        return "Прислать короткий разбор?"
+    return "Могу прислать макет главной — посмотрите, подходит ли. Прислать?"
+
+
+def _pitch_benefit(ctx: dict, gaps: list[dict]) -> str:
+    if ctx["has_site"] and any(gap["code"] in ISSUE_TEXT for gap in gaps):
+        return (
+            "Клиенту проще дойти до заявки, а вам — не терять тех, "
+            "кто уже пришёл."
+        )
+    if not ctx["has_site"] or ctx["social_only"]:
+        return (
+            "Клиенту проще выбрать и заказать, а вам — меньше пустых звонков."
+        )
+    return ""
 
 
 def _trim_body(body: str, limit: int) -> str:
@@ -972,44 +1107,34 @@ def _trim_body(body: str, limit: int) -> str:
         return body
     cut = body[:limit]
     boundary = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-    if boundary >= 300:
+    if boundary >= 250:
         return cut[: boundary + 1].strip()
     fallback = cut.rstrip(" ,;:-")
     space = fallback.rfind(" ")
-    if space >= 300:
+    if space >= 250:
         fallback = fallback[:space]
     return fallback.rstrip(" ,;:-")
 
 
 def _compose_pitch(ctx: dict, offer: dict, gaps: list[dict]) -> str:
-    bullets = offer["bullets"][:2]
-    bullet_text = "; ".join(_lower_first(item) for item in bullets)
-    body = " ".join(
-        (
-            _intro(ctx),
-            _site_sentence(ctx, gaps),
-            f"Предлагаю вариант — {offer['title']}. "
-            f"Внутри — {bullet_text}.",
-        )
-    )
-    closing = (
-        "Если удобно, покажу короткий пример за 10–15 минут. "
-        "Когда можно созвониться?"
-    )
-    text = body + " " + closing
-    for extra in PITCH_PADDING:
-        if len(text) >= 400:
-            break
-        candidate = body + " " + extra + " " + closing
-        if len(candidate) <= 900:
-            body, text = body + " " + extra, candidate
-    if len(text) > 900:
-        body = _trim_body(body, 900 - len(closing) - 1)
+    """Короткое живое сообщение по схеме: наблюдение → проблема → оффер → CTA."""
+    group = _offer_group((ctx["category"] + " " + ctx["name"]).lower())
+    parts = [
+        _pitch_hook(ctx),
+        _pitch_problem(ctx, group, gaps),
+        _pitch_offer(ctx, group, gaps),
+    ]
+    benefit = _pitch_benefit(ctx, gaps)
+    if benefit:
+        parts.append(benefit)
+    parts.append(_pitch_cta(ctx, gaps))
+    text = " ".join(part for part in parts if part).strip()
+
+    limit = 750
+    if len(text) > limit:
+        closing = _pitch_cta(ctx, gaps)
+        body = _trim_body(text[: -len(closing)].strip(), limit - len(closing) - 1)
         text = body + " " + closing
-    if len(text) > 900:
-        text = text[:900].rstrip(" ,;:-")
-        if not text.endswith("?"):
-            text = text[:-1].rstrip(" ,;:-") + "?"
     return text
 
 

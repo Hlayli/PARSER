@@ -68,6 +68,14 @@ INTEL = {
     "contacts": {"phone": "+7 (900) 111-22-33"},
 }
 
+GOOD_PITCH = (
+    "Здравствуйте! Увидел «Кофейню Ромашка» в справочнике — 3 точки, "
+    "рейтинг 4,7. Сайта нет: клиенту из поиска негде посмотреть меню и цены. "
+    "Я делаю сайты для кофеен и небольших сетей. Начать можно с одной "
+    "страницы: меню, адреса точек и кнопка WhatsApp. Могу прислать макет "
+    "главной — посмотрите, подходит ли. Прислать?"
+)
+
 
 class StatusTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -122,10 +130,11 @@ class BuildMessagesTestCase(unittest.TestCase):
         system = messages[0]["content"].lower()
         self.assertIn("не выдумывай", system)
         self.assertIn("markdown", system)
-        self.assertIn("500", system)
-        self.assertIn("900", system)
+        self.assertIn("350", system)
+        self.assertIn("650", system)
         self.assertIn("[имя]", system)
-        self.assertIn("звонк", system)
+        self.assertIn("созвон", system)
+        self.assertIn("прислать", system)
 
     def test_user_json_has_facts_and_offer(self) -> None:
         user = json.loads(ai.build_messages(LEAD, INTEL)[1]["content"])
@@ -240,7 +249,7 @@ class GeneratePitchTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_successful_response(self) -> None:
         payload = {
             "choices": [
-                {"message": {"content": "  Здравствуйте! Предлагаю лендинг.  "}}
+                {"message": {"content": f"  {GOOD_PITCH}  "}}
             ]
         }
         client, factory = patch_client(self, response=make_response(200, payload))
@@ -256,7 +265,7 @@ class GeneratePitchTestCase(unittest.IsolatedAsyncioTestCase):
             result = await ai.generate_pitch(LEAD, INTEL)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["text"], "Здравствуйте! Предлагаю лендинг.")
+        self.assertEqual(result["text"], GOOD_PITCH)
         self.assertEqual(result["error"], "")
         self.assertEqual(result["model"], "test-model")
 
@@ -271,6 +280,25 @@ class GeneratePitchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["temperature"], 0.6)
         self.assertEqual(body["max_tokens"], 500)
         self.assertEqual(body["messages"][0]["role"], "system")
+
+    async def test_short_response_is_rejected(self) -> None:
+        payload = {"choices": [{"message": {"content": "Здравствуйте! Прислать?"}}]}
+        patch_client(self, response=make_response(200, payload))
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "sk-test"}):
+            result = await ai.generate_pitch(LEAD, INTEL)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "bad_length")
+
+    async def test_template_phrases_are_rejected(self) -> None:
+        text = GOOD_PITCH.replace("Прислать?", "Предлагаю вариант. Прислать?")
+        payload = {"choices": [{"message": {"content": text}}]}
+        patch_client(self, response=make_response(200, payload))
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "sk-test"}):
+            result = await ai.generate_pitch(LEAD, INTEL)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "bad_style")
 
     async def test_empty_content(self) -> None:
         payload = {"choices": [{"message": {"content": "   "}}]}
@@ -318,7 +346,7 @@ class GeneratePitchTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "TypeError")
 
     async def test_timeout_is_clamped(self) -> None:
-        payload = {"choices": [{"message": {"content": "текст"}}]}
+        payload = {"choices": [{"message": {"content": GOOD_PITCH}}]}
         for raw, expected in (("1", 5.0), ("999", 60.0), ("abc", 25.0)):
             client, factory = patch_client(self, response=make_response(200, payload))
             with mock.patch.dict(
