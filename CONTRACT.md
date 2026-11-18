@@ -18,8 +18,12 @@
 | `backend/categories.py` | core | каталог ниш и сборка поисковых запросов |
 | `backend/app.py` | core | FastAPI, роуты, статика |
 | `backend/adapters/*` | adapters | 3 источника + base + registry |
-| `backend/enrichment.py` | enrichment | обход сайта, факты |
+| `backend/enrichment.py` | enrichment | payload'ы источников + обход сайта, факты |
+| `backend/source_facts.py` | enrichment | контакты и адреса из сохранённых payload'ов |
+| `backend/site_audit.py` | enrichment | технический аудит HTML без сети |
 | `backend/geocode.py` | enrichment | город → bbox (Nominatim) |
+| `backend/intel.py` | intel | потенциал, зацепки, оффер, контакты, сообщение |
+| `backend/ai.py` | intel | опциональный OpenAI-совместимый клиент |
 | `frontend/*` | frontend | HTML/CSS/JS |
 | `tests/*`, `README.md`, `docs/*` | docs | тесты, документация, research |
 
@@ -100,8 +104,12 @@ def list_leads(conn, **filters) -> tuple[int, list[dict]]
 def get_lead(conn, business_id: str) -> dict | None
 def set_status(conn, business_id: str, status: str | None = None,
                is_favorite: bool | None = None, note: str | None = None) -> bool
+def set_site_audit(conn, business_id: str, audit: dict) -> None
+def fill_empty_fields(conn, business_id: str, values: dict) -> list[str]
+def add_location(conn, business_id, source, source_id, address,
+                 phone="", lat=None, lon=None, url="") -> bool
 def add_fact(conn, business_id: str, kind: str, value: str,
-             source_url: str) -> None
+             source_url: str) -> bool
 def stats(conn) -> dict
 def find_duplicate_groups(conn) -> list[dict]
 def merge_duplicate_groups(conn) -> int
@@ -115,7 +123,7 @@ business(
   id TEXT PK, source TEXT, source_id TEXT, name TEXT, category TEXT,
   address TEXT, lat REAL, lon REAL, phone TEXT, phone_norm TEXT,
   website TEXT, rating REAL, reviews_count INTEGER, price_range TEXT,
-  hours TEXT, photos_json TEXT, url TEXT,
+  hours TEXT, photos_json TEXT, site_json TEXT, url TEXT,
   name_key TEXT, compact_key TEXT, brand_key TEXT,
   address_key TEXT, phone_keys TEXT, site_key TEXT,
   status TEXT DEFAULT 'new',        -- new|in_progress|called|rejected
@@ -151,6 +159,9 @@ scan_cell(id INTEGER PK, job_id TEXT, ix INTEGER, iy INTEGER,
 `locations_count` и `locations` (адрес, телефон, координаты, `sources`, url).
 Одна точка, пришедшая из 2ГИС и Яндекса с разным написанием адреса, схлопывается
 в одну строку, оба источника остаются в `sources`.
+`get_lead` также парсит `site_json` в `site_audit` и добавляет `intel`
+(`backend/intel.py`). Это чистый расчёт на чтении: без сети и без записи в БД.
+Пустая карточка без названия/контактов получает низкий потенциал, а не «высокий».
 Склейка накопленной базы — `python -m backend.merge_duplicates [--apply]`.
 
 `fact.kind`: `email | phone | price | photo | social | director | description | inn | hours | address`.
@@ -199,7 +210,7 @@ SCANNER: ScanManager   # глобальный синглтон
 | Метод | Путь | Тело / параметры | Ответ |
 |---|---|---|---|
 | GET | `/` | — | `frontend/index.html` |
-| GET | `/api/health` | — | `{ok, adapters:[{name,label,available,reason}], demo}` |
+| GET | `/api/health` | — | `{ok, adapters:[{name,label,available,reason}], demo, ai:{configured,model,base_url}}` |
 | GET | `/api/categories` | — | `{groups:[{id,title,categories:[{id,label,query}]}], total, default, popular}` |
 | POST | `/api/scan/estimate` | `{categories?, query?, city?, bbox?, cell_deg?}` | `{queries, cells, requests, bbox}` |
 | POST | `/api/scan` | `{categories?, query?, city?, bbox?, cell_deg?, sources[], limit_per_cell?}` | `{job_id, cells, queries, bbox}` |
@@ -209,9 +220,10 @@ SCANNER: ScanManager   # глобальный синглтон
 | POST | `/api/jobs/{id}/resume` | — | `{ok}` |
 | POST | `/api/jobs/{id}/stop` | — | `{ok}` |
 | GET | `/api/leads` | `status, source, q, fav, site=no\|yes, sort, limit, offset` | `{total, items:[...]}` |
-| GET | `/api/leads/{id}` | — | полная карточка + `facts`, `sources`, `locations` |
+| GET | `/api/leads/{id}` | — | полная карточка + `facts`, `sources`, `locations`, `site_audit`, `intel` |
 | PATCH | `/api/leads/{id}` | `{status?, is_favorite?, note?}` | `{ok, lead}` |
-| POST | `/api/leads/{id}/enrich` | — | `{added:{...}, errors:[], lead:{...}}` |
+| POST | `/api/leads/{id}/enrich` | — | `{status, message, added, errors, site_audit, website, lead}` |
+| POST | `/api/leads/{id}/pitch` | — | `{ok, source:"ai"\|"template", text, model, error}` |
 | GET | `/api/stats` | — | `{total, by_status:{...}, by_source:{...}, favorites, with_site, no_site}` |
 | GET | `/api/events` | — | `text/event-stream` |
 
@@ -229,17 +241,31 @@ SCANNER: ScanManager   # глобальный синглтон
 
 ---
 
-## 7. Enrichment
+## 7. Enrichment и аналитика карточки
 
 ```python
 async def enrich(business_id: str) -> dict:
-    """Обходит сайт бизнеса и сохраняет ТОЛЬКО реально найденное.
-    Возвращает {"added": {"email": 1, ...}, "errors": [...]}"""
+    """Контакты из payload'ов источников + обход сайта + аудит.
+    Возвращает {status, message, added:{kind:count}, errors:[...],
+                site_audit: dict|None, website: str}"""
 ```
 
 Правила:
-- Только `http(s)` сайты. Максимум 6 страниц с домена (главная + `contacts`, `about`, `price`, `menu`, `услуги`).
-- Таймаут 10 сек на страницу, общий бюджет 60 сек.
+- Сначала читаются сохранённые `business_source.payload_json` через
+  `source_facts.extract_source_data(payload, source)`. Это работает без сети и
+  без сайта: телефоны, email, соцсети, часы, описание, рейтинг, отзывы, адрес,
+  координаты.
+- `fill_empty_fields` заполняет только пустые поля бизнеса: ручные и уже
+  собранные данные не перезаписываются. Адрес из 2ГИС не собирается из
+  «Город/Район/Микрорайон» — улицы в payload'е нет. Адрес и координаты Яндекса
+  добавляются в `business_location`; пустая техническая точка получает адрес,
+  а не дублируется.
+- Если сайта нет после разбора payload'ов — `status="no_site"`, это не ошибка.
+  Если вместо сайта соцсеть (`vk.com`, `t.me`, `wa.me`, `ok.ru`,
+  `instagram.com`, `youtube.com`) — `status="social_only"`, сайт не обходится.
+- Для обычного `http(s)` сайта: максимум 6 страниц с домена (главная +
+  `contacts`, `about`, `price`, `menu`, `услуги`), таймаут 10 сек на страницу,
+  общий бюджет 60 сек.
 - `Director`: искать в тексте `директор|руководитель|генеральный директор|ИП` + ФИО рядом.
   Сохранять только если рядом реально есть имя/ФИО. Никаких догадок.
 - `price`: только явные цены (`1 500 ₽`, `1500 руб`, `от 2 000 рублей`) в контексте услуг/меню.
@@ -250,6 +276,40 @@ async def enrich(business_id: str) -> dict:
 - Каждый факт — с `source_url`.
 - Дедуп фактов по `(kind, value)`; телефоны — по нормализованному номеру,
   фото — по каноническому URL.
+- Технический аудит главной страницы сохраняется в `business.site_json`
+  (`set_site_audit`) и отдаётся как `lead.site_audit`: `url, final_url, status,
+  ok, https, redirected, elapsed_ms, html_kb, title, description,
+  has_viewport, has_h1, has_form, has_booking, has_menu, has_prices,
+  has_contacts, cms, error, checked_at`. Если сайт не открылся, сохраняется
+  `error`, чтобы карточка могла показать «сайт недоступен».
+
+`backend/intel.py` (чистые функции, без сети/БД):
+
+```python
+def build_intel(lead: dict) -> dict
+def build_pitch(lead: dict, intel: dict) -> str
+```
+
+`intel` содержит `score` (5..98), `label`, `summary`, `hooks`, `strengths`,
+`gaps`, `offer{title,why,bullets}`, `pitch`, `contacts` (phone/whatsapp/
+telegram/vk/website/email, дедуп по href), `site{has_site,url,social_only,
+checks,score}`. Оценка выше для бизнеса без нормального сайта, сети и хорошего
+рейтинга; для сильного сайта с HTTPS, мобильной версией, описанием и формой —
+ниже. Только факты из карточки, без выдуманных цифр и гарантий.
+
+`backend/ai.py` (опционально):
+
+- `status() -> {configured, model, base_url}`; ключ никогда не отдаётся.
+- `build_messages(lead, intel) -> list[dict]` — системный промпт запрещает
+  выдумывать имена, цены, гарантии и конкурентов.
+- `async generate_pitch(lead, intel) -> {ok, text, error, model}`; без ключа
+  `error="not_configured"`, сетевых запросов нет. Любая ошибка возвращается
+  словарём, исключения наружу не выходят.
+- Переменные: `LLM_API_KEY` (или `OPENAI_API_KEY`), `LLM_BASE_URL`
+  (по умолчанию `https://api.openai.com/v1`), `LLM_MODEL` (`gpt-4o-mini`),
+  `LLM_TIMEOUT` (25 сек, 5..60). Ключ читается при вызове.
+- `POST /api/leads/{id}/pitch` при отсутствии ключа или сбое возвращает
+  `source="template"` и `intel.pitch`; приложение работает без ИИ.
 
 `geocode.py`:
 ```python
@@ -270,6 +330,13 @@ Nominatim, `User-Agent: PARSER/1.0`, таймаут 10 с, `limit=1`.
 - Под формой показывается оценка объёма (`/api/scan/estimate`), в прогрессе —
   «Категория N из M» и кнопка «Стоп» для долгого скана.
 - Мини-меню на каждой карточке: `★` избранное, `☎` отзвонено, `⚙` в работе, `✕` отказ.
+- Карточка показывает продажный блок из `lead.intel`: потенциал и зацепки,
+  оффер, готовое сообщение с кнопками «Копировать» и «Сгенерировать с ИИ»,
+  быстрые контакты, аудит сайта из `lead.site_audit`.
+- «Обогатить» вызывает `/enrich`; сообщение результата сохраняется после
+  перерисовки карточки. Для `no_site`/`social_only` это не ошибка.
+- ИИ не обязателен: без ключа кнопка показывает шаблон и подпись «шаблон из
+  карточки»; при наличии ключа — текст от модели и её имя.
 - Показ источника и бейджа `ДЕМО` для `is_demo`.
 - Пустые поля: писать «нет данных», не придумывать.
 - Фото: `<img loading="lazy">` с `onerror` → скрыть.

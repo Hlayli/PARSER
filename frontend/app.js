@@ -27,6 +27,7 @@ const state = {
   grid: { nx: 0, ny: 0 },
   cells: new Map(),
   stream: { connected: false },
+  ai: null,
   categories: { groups: [], total: 0, default: [], popular: [] },
   categoriesLoaded: false,
   selectedCategories: new Set(),
@@ -123,6 +124,7 @@ async function loadHealth() {
   try {
     const data = await api('/health');
     state.adapters = data.adapters || [];
+    state.ai = data.ai && typeof data.ai === 'object' ? data.ai : null;
     renderSources();
     $('#demo-badge').hidden = !state.adapters.some((a) => a.name === 'demo' && a.available);
   } catch (error) {
@@ -923,6 +925,8 @@ function openDetail(id) {
   pane.hidden = false;
   $('#detail-backdrop').hidden = false;
   pane.classList.add('is-open');
+  const scroller = $('#detail-content');
+  if (scroller) scroller.scrollTop = 0;
 
   $('#detail-content').innerHTML = `
     <div class="detail-skeleton">
@@ -945,7 +949,300 @@ function openDetail(id) {
     });
 }
 
-function renderDetail(lead) {
+const CONTACT_TYPES = ['phone', 'whatsapp', 'telegram', 'vk', 'website', 'email'];
+const CONTACT_LABELS = {
+  phone: 'Позвонить',
+  whatsapp: 'WhatsApp',
+  telegram: 'Telegram',
+  vk: 'ВКонтакте',
+  website: 'Сайт',
+  email: 'Email',
+};
+
+function scoreClass(score) {
+  if (!Number.isFinite(score)) return '';
+  if (score >= 70) return 'score--high';
+  if (score >= 40) return 'score--mid';
+  return 'score--low';
+}
+
+function isEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value ?? '').trim());
+}
+
+function contactHref(contact) {
+  const type = String(contact.type || '');
+  const href = String(contact.href || '').trim();
+  const label = String(contact.label || '').trim();
+
+  if (type === 'phone') {
+    return telHref(href.replace(/^tel:/i, '') || label);
+  }
+  if (type === 'email') {
+    const value = href.replace(/^mailto:/i, '').trim() || label;
+    return isEmail(value) ? `mailto:${value}` : '';
+  }
+  return safeUrl(href);
+}
+
+function renderQuickContacts(intel) {
+  if (!intel || !Array.isArray(intel.contacts)) return '';
+
+  const items = [];
+  const seen = new Set();
+  for (const contact of intel.contacts) {
+    if (!contact || typeof contact !== 'object') continue;
+    const type = String(contact.type || '');
+    if (!CONTACT_TYPES.includes(type) || seen.has(type)) continue;
+    const href = contactHref(contact);
+    if (!href) continue;
+    seen.add(type);
+
+    const label = CONTACT_LABELS[type];
+    const aria = type === 'phone' && contact.label
+      ? `${label}: ${contact.label}`
+      : label;
+    const external = type === 'phone' || type === 'email'
+      ? ''
+      : ' target="_blank" rel="noopener noreferrer"';
+    items.push(`<a class="quick-contact quick-contact--${type}" href="${escapeHtml(href)}"${external} aria-label="${escapeHtml(aria)}">${escapeHtml(label)}</a>`);
+  }
+
+  if (!items.length) return '';
+  return `<div class="quick-contacts" role="group" aria-label="Быстрая связь">${items.join('')}</div>`;
+}
+
+function renderIntelBlock(intel) {
+  if (!intel) return '';
+
+  const rawScore = Number(intel.score);
+  const hasScore = Number.isFinite(rawScore);
+  const score = hasScore ? Math.max(0, Math.min(100, Math.round(rawScore))) : null;
+  const label = ['высокий', 'средний', 'низкий'].includes(intel.label)
+    ? intel.label
+    : '';
+  const summary = String(intel.summary || '').trim();
+  const hooks = (Array.isArray(intel.hooks) ? intel.hooks : [])
+    .filter((hook) => hook && typeof hook === 'object' && (hook.title || hook.detail))
+    .slice(0, 6);
+
+  if (!hasScore && !summary && !hooks.length) return '';
+
+  const scoreHtml = hasScore
+    ? `<div class="intel-score ${scoreClass(score)}">
+        <div class="intel-score-value">${score}</div>
+        ${label ? `<div class="intel-label">${escapeHtml(label)}</div>` : ''}
+      </div>`
+    : '';
+
+  const hooksHtml = hooks.length
+    ? `<ul class="hook-list">${hooks.map((hook) => {
+        const kind = hook.kind === 'strength' ? 'strength' : 'gap';
+        const title = String(hook.title || hook.detail || '').trim();
+        const detail = String(hook.detail || '').trim();
+        const showDetail = detail && detail !== title;
+        return `<li class="hook-item hook-item--${kind}">
+          <span class="hook-mark" aria-hidden="true">${kind === 'strength' ? '+' : '−'}</span>
+          <span class="sr-only">${kind === 'strength' ? 'Сильная сторона' : 'Слабое место'}: </span>
+          <div class="hook-body">
+            <div class="hook-title">${escapeHtml(title)}</div>
+            ${showDetail ? `<div class="hook-detail">${escapeHtml(detail)}</div>` : ''}
+          </div>
+        </li>`;
+      }).join('')}</ul>`
+    : '';
+
+  return `<section class="detail-section intel-block">
+    <h3 class="detail-section-title">Потенциал</h3>
+    <div class="intel-head">
+      ${scoreHtml}
+      ${summary ? `<p class="intel-summary">${escapeHtml(summary)}</p>` : ''}
+    </div>
+    ${hooksHtml}
+  </section>`;
+}
+
+function renderOfferBlock(intel) {
+  const offer = intel && intel.offer;
+  if (!offer || typeof offer !== 'object') return '';
+
+  const title = String(offer.title || '').trim();
+  const why = String(offer.why || '').trim();
+  const bullets = (Array.isArray(offer.bullets) ? offer.bullets : [])
+    .map((bullet) => String(bullet || '').trim())
+    .filter(Boolean);
+
+  if (!title && !why && !bullets.length) return '';
+
+  return `<section class="detail-section offer-block">
+    <h3 class="detail-section-title">Что предложить</h3>
+    ${title ? `<p class="offer-title">${escapeHtml(title)}</p>` : ''}
+    ${why ? `<p class="offer-why">${escapeHtml(why)}</p>` : ''}
+    ${bullets.length ? `<ul class="offer-bullets">${bullets.map((bullet) => `
+      <li><span class="offer-check" aria-hidden="true">✓</span><span>${escapeHtml(bullet)}</span></li>`).join('')}</ul>` : ''}
+  </section>`;
+}
+
+function renderPitchBlock(intel) {
+  if (!intel) return '';
+
+  const pitch = String(intel.pitch || '');
+  const aiOff = Boolean(state.ai && state.ai.configured === false);
+
+  return `<section class="detail-section pitch-block">
+    <h3 class="detail-section-title">Сообщение для первого контакта</h3>
+    <textarea class="pitch-text" id="pitch-text" rows="8" spellcheck="false"
+              aria-label="Сообщение для первого контакта"
+              placeholder="Сообщения пока нет — сгенерируйте его или напишите вручную.">${escapeHtml(pitch)}</textarea>
+    <div class="pitch-actions">
+      <button class="btn btn--ghost btn--sm" id="pitch-gen" type="button">Сгенерировать с ИИ</button>
+      <button class="btn btn--secondary btn--sm" id="pitch-copy" type="button">Копировать</button>
+    </div>
+    <p class="pitch-hint${aiOff ? ' is-muted' : ''}" id="pitch-hint">${aiOff ? 'ИИ не настроен — будет использован шаблон' : ''}</p>
+  </section>`;
+}
+
+function renderSiteAuditBlock(intel, audit) {
+  const site = intel && intel.site && typeof intel.site === 'object' ? intel.site : null;
+  if (!site) return '';
+
+  const auditObj = audit && typeof audit === 'object' ? audit : {};
+  const head = '<h3 class="detail-section-title">Аудит сайта</h3>';
+
+  if (site.social_only) {
+    const raw = String(site.url || auditObj.url || '').trim();
+    const url = safeUrl(raw);
+    const link = url
+      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(raw)}</a>`
+      : escapeHtml(raw || 'ссылка не указана');
+    return `<section class="detail-section site-audit">
+      ${head}
+      <p class="site-note">Вместо сайта — соцсеть: ${link}</p>
+    </section>`;
+  }
+
+  if (!site.has_site) {
+    return `<section class="detail-section site-audit">
+      ${head}
+      <p class="site-note">Сайта нет — это главный повод для предложения.</p>
+    </section>`;
+  }
+
+  const rawUrl = String(site.url || auditObj.url || '').trim();
+  const url = safeUrl(rawUrl);
+  const urlHtml = url
+    ? `<a class="site-audit-url" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(rawUrl)}</a>`
+    : `<span class="site-audit-url">${escapeHtml(rawUrl || 'адрес не указан')}</span>`;
+
+  const rawScore = Number(site.score);
+  const hasScore = Number.isFinite(rawScore);
+  const score = hasScore ? Math.max(0, Math.min(100, Math.round(rawScore))) : null;
+  const scoreHtml = hasScore
+    ? `<span class="site-audit-score ${scoreClass(score)}">${score}<span class="site-audit-score-max">/100</span></span>`
+    : '';
+
+  const checks = (Array.isArray(site.checks) ? site.checks : [])
+    .filter((check) => check && typeof check === 'object' && (check.label || check.key));
+
+  const checksHtml = checks.length
+    ? `<ul class="audit-grid">${checks.map((check) => {
+        const ok = check.ok === true ? true : check.ok === false ? false : null;
+        const state = ok === true ? 'ok' : ok === false ? 'bad' : 'unknown';
+        const icon = ok === true ? '✓' : ok === false ? '✕' : '—';
+        const stateText = ok === true ? 'есть' : ok === false ? 'нет' : 'неизвестно';
+        const label = String(check.label || check.key || '').trim();
+        const value = String(check.value || '').trim();
+        return `<li class="audit-item audit-${state}" aria-label="${escapeHtml(`${label}: ${stateText}${value ? `, ${value}` : ''}`)}">
+          <span class="audit-icon" aria-hidden="true">${icon}</span>
+          <span class="audit-label">${escapeHtml(label)}</span>
+          ${value ? `<span class="audit-value">${escapeHtml(value)}</span>` : ''}
+          <span class="sr-only">${stateText}</span>
+        </li>`;
+      }).join('')}</ul>`
+    : '<p class="site-note">Данных проверки пока нет — обогатите карточку.</p>';
+
+  const error = String(auditObj.error || '').trim();
+  const checkedAt = auditObj.checked_at ? formatDate(auditObj.checked_at) : '';
+
+  return `<section class="detail-section site-audit">
+    ${head}
+    <div class="site-audit-head">${urlHtml}${scoreHtml}</div>
+    ${checksHtml}
+    ${error ? `<p class="audit-warning"><span aria-hidden="true">⚠</span> ${escapeHtml(error)}</p>` : ''}
+    ${checkedAt ? `<p class="audit-meta">проверено ${checkedAt}</p>` : ''}
+  </section>`;
+}
+
+function buildEnrichResult(data) {
+  if (!data || typeof data !== 'object') return null;
+
+  const status = String(data.status || '');
+  const message = String(data.message || '').trim();
+  const added = data.added && typeof data.added === 'object' ? data.added : {};
+  const parts = Object.entries(added)
+    .filter(([, value]) => Number(value) > 0)
+    .map(([kind, value]) => `${factLabel(kind)}: ${value}`);
+  const errors = (Array.isArray(data.errors) ? data.errors : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  if (!message && !parts.length && !errors.length) return null;
+
+  let className = 'enrich-result';
+  if (status === 'error') className += ' is-error';
+  else if (status === 'ok') className += ' is-ok';
+  else if (status === 'no_site' || status === 'social_only') className += ' is-neutral';
+
+  const blocks = [];
+  if (message) blocks.push(`<p>${escapeHtml(message)}</p>`);
+  if (parts.length) blocks.push(`<p>Добавлено — ${escapeHtml(parts.join(', '))}.</p>`);
+  if (errors.length) {
+    blocks.push(`<ul>${errors.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`);
+  }
+
+  return { className, html: blocks.join('') };
+}
+
+async function copyText(text) {
+  const value = String(text ?? '');
+  if (!value) return false;
+
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch (_) {
+    /* переходим к запасному способу */
+  }
+
+  try {
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand('copy');
+    area.remove();
+    return copied;
+  } catch (_) {
+    return false;
+  }
+}
+
+function renderDetail(lead, options = {}) {
+  const scroller = $('#detail-content');
+  const scrollTop = scroller ? scroller.scrollTop : 0;
+  const intel = lead.intel && typeof lead.intel === 'object' ? lead.intel : null;
+  const enrich = buildEnrichResult(options.enrich);
+  const quickContacts = renderQuickContacts(intel);
+  const intelBlock = renderIntelBlock(intel);
+  const offerBlock = renderOfferBlock(intel);
+  const pitchBlock = renderPitchBlock(intel);
+  const siteAuditBlock = renderSiteAuditBlock(intel, lead.site_audit);
   const facts = lead.facts || {};
   const photos = (lead.photos || []).filter((url) => safeUrl(url));
   const priceFacts = facts.price || [];
@@ -1004,6 +1301,12 @@ function renderDetail(lead) {
         ${website ? `<a class="detail-website" href="${escapeHtml(website)}" target="_blank" rel="noopener noreferrer">${escapeHtml(lead.website)}</a>` : '<span class="no-data">сайта нет</span>'}
       </div>
     </div>
+
+    ${quickContacts}
+    ${intelBlock}
+    ${offerBlock}
+    ${pitchBlock}
+    ${siteAuditBlock}
 
     <section class="detail-section">
       <h3 class="detail-section-title">Статус работы</h3>
@@ -1121,7 +1424,7 @@ function renderDetail(lead) {
       <div class="enrich-actions">
         <button class="btn btn--secondary" id="enrich-btn" type="button">Обогатить данные</button>
       </div>
-      <div class="enrich-result" id="enrich-result" hidden></div>
+      <div class="${enrich ? enrich.className : 'enrich-result'}" id="enrich-result" ${enrich ? '' : 'hidden'}>${enrich ? enrich.html : ''}</div>
     </div>
 
     <div class="note-block">
@@ -1134,6 +1437,7 @@ function renderDetail(lead) {
 
   const content = $('#detail-content');
   content.innerHTML = html;
+  if (scroller) scroller.scrollTop = scrollTop;
 
   // битые фото скрываем, а не подменяем заглушкой
   $$('.photo-item img', content).forEach((img) => {
@@ -1178,6 +1482,63 @@ function renderDetail(lead) {
     }
   });
 
+  const pitchText = $('#pitch-text', content);
+  const pitchHint = $('#pitch-hint', content);
+  const pitchCopy = $('#pitch-copy', content);
+  const pitchGen = $('#pitch-gen', content);
+
+  if (pitchCopy && pitchText) {
+    pitchCopy.addEventListener('click', async () => {
+      const copied = await copyText(pitchText.value);
+      toast(
+        copied ? 'Сообщение скопировано' : 'Не удалось скопировать сообщение',
+        copied ? 'success' : 'error',
+      );
+    });
+  }
+
+  if (pitchGen && pitchText) {
+    pitchGen.addEventListener('click', async () => {
+      pitchGen.disabled = true;
+      pitchGen.textContent = 'Генерируем…';
+      if (pitchHint) {
+        pitchHint.textContent = '';
+        pitchHint.className = 'pitch-hint';
+      }
+
+      try {
+        const data = await api(`/leads/${lead.id}/pitch`, { method: 'POST' });
+        if (data && typeof data.text === 'string' && data.text.trim()) {
+          pitchText.value = data.text;
+        }
+        if (pitchHint) {
+          if (data && data.source === 'ai') {
+            const model = data.model ? ` (${data.model})` : '';
+            pitchHint.textContent = `Сгенерировано ИИ${model}`;
+            pitchHint.className = 'pitch-hint is-ai';
+          } else {
+            let hint = 'Шаблон из карточки';
+            if (data && data.error && data.error !== 'not_configured') {
+              hint += ` · ИИ недоступен: ${data.error}`;
+            }
+            pitchHint.textContent = hint;
+            pitchHint.className = 'pitch-hint';
+          }
+        }
+        toast('Сообщение готово', 'success');
+      } catch (error) {
+        if (pitchHint) {
+          pitchHint.textContent = `Не удалось сгенерировать: ${error.message}`;
+          pitchHint.className = 'pitch-hint is-error';
+        }
+        toast(`Не удалось сгенерировать сообщение: ${error.message}`, 'error');
+      } finally {
+        pitchGen.disabled = false;
+        pitchGen.textContent = 'Сгенерировать с ИИ';
+      }
+    });
+  }
+
   $('#enrich-btn', content).addEventListener('click', async (event) => {
     const button = event.currentTarget;
     const result = $('#enrich-result', content);
@@ -1189,20 +1550,19 @@ function renderDetail(lead) {
 
     try {
       const data = await api(`/leads/${lead.id}/enrich`, { method: 'POST' });
-      const added = data.added || {};
-      const total = Object.values(added).reduce((sum, value) => sum + Number(value || 0), 0);
-      const parts = Object.entries(added)
-        .filter(([, value]) => Number(value) > 0)
-        .map(([kind, value]) => `${factLabel(kind)}: ${value}`);
+      const summary = buildEnrichResult(data);
 
-      result.className = `enrich-result ${total ? 'is-ok' : ''}`;
-      result.textContent = total
-        ? `Добавлено — ${parts.join(', ')}.`
-        : 'Новых данных не найдено.';
-      if (data.errors?.length) {
-        result.textContent += ` Ошибки: ${data.errors.join('; ')}`;
+      if (data.lead) {
+        renderDetail(data.lead, { enrich: data });
+        return;
       }
-      if (data.lead) renderDetail(data.lead);
+
+      if (summary) {
+        result.className = summary.className;
+        result.innerHTML = summary.html;
+      } else {
+        result.textContent = 'Новых данных не найдено.';
+      }
     } catch (error) {
       result.className = 'enrich-result is-error';
       result.textContent = `Не удалось обогатить: ${error.message}`;

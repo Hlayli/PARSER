@@ -76,8 +76,15 @@ async def health() -> dict:
             ok, reason = False, str(exc)
         adapters.append({"name": name, "label": adapter.label,
                          "available": bool(ok), "reason": reason})
+    try:
+        from . import ai as ai_client
+
+        ai_info = ai_client.status()
+    except Exception:  # noqa: BLE001 — ИИ опционален
+        ai_info = {"configured": False, "model": "", "base_url": ""}
     return {"ok": True, "adapters": adapters,
-            "demo": any(a["name"] == "demo" and a["available"] for a in adapters)}
+            "demo": any(a["name"] == "demo" and a["available"] for a in adapters),
+            "ai": ai_info}
 
 
 @app.get("/api/stats")
@@ -310,6 +317,44 @@ async def enrich_lead(business_id: str) -> dict:
     with db.connect() as conn:
         result["lead"] = db.get_lead(conn, business_id)
     return result
+
+
+@app.post("/api/leads/{business_id}/pitch")
+async def pitch_lead(business_id: str) -> dict:
+    """Готовое сообщение для первого контакта: ИИ, иначе шаблон из карточки."""
+    with db.connect() as conn:
+        lead = db.get_lead(conn, business_id)
+    if not lead:
+        raise HTTPException(404, "лид не найден")
+
+    intel = lead.get("intel")
+    if not isinstance(intel, dict) or not intel:
+        from .intel import build_intel
+
+        intel = build_intel(lead)
+
+    from .ai import generate_pitch
+    from .intel import build_pitch
+
+    generated = await generate_pitch(lead, intel)
+    text = str(generated.get("text") or "").strip()
+    if generated.get("ok") and text:
+        return {
+            "ok": True,
+            "source": "ai",
+            "text": text,
+            "model": generated.get("model", ""),
+            "error": "",
+        }
+
+    fallback = str(intel.get("pitch") or "").strip() or build_pitch(lead, intel)
+    return {
+        "ok": True,
+        "source": "template",
+        "text": fallback,
+        "model": generated.get("model", ""),
+        "error": generated.get("error", ""),
+    }
 
 
 # --- SSE --------------------------------------------------------------------

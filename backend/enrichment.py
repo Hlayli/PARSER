@@ -18,7 +18,15 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup
 
-from .db import add_fact, connect, get_lead
+from .db import (
+    add_fact,
+    add_location,
+    connect,
+    fill_empty_fields,
+    get_lead,
+    set_site_audit,
+)
+from . import site_audit, source_facts
 
 logger = logging.getLogger(__name__)
 
@@ -608,10 +616,112 @@ def _note_error(errors: list[str], message: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def enrich(business_id: str) -> dict:
-    """Обходит сайт бизнеса и сохраняет только реально найденные факты.
+def _apply_source_payloads(
+    conn,
+    business_id: str,
+    remember,
+) -> dict:
+    """Собрать контакты и адреса из сохранённых payload'ов 2ГИС/Яндекса.
 
-    Возвращает ``{"added": {"email": 1, ...}, "errors": [...]}``.
+    Ничего не додумываем: берём только явные поля источников. Заполняем
+    исключительно пустые поля бизнеса, чтобы не затереть ручные правки.
+    """
+    found = {
+        "website": "",
+        "phone": "",
+        "hours": "",
+        "rating": "",
+        "reviews_count": None,
+        "category": "",
+        "address": "",
+        "lat": None,
+        "lon": None,
+        "locations_added": 0,
+    }
+
+    rows = conn.execute(
+        "SELECT source, source_id, url, payload_json FROM business_source "
+        "WHERE business_id = ? ORDER BY rowid",
+        (business_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            data = source_facts.extract_source_data(payload, str(row["source"]))
+        except Exception:  # noqa: BLE001 — один битый payload не ломает обогащение
+            logger.exception("не удалось разобрать payload %s", business_id)
+            continue
+
+        source_url = str(payload.get("url") or row["url"] or "")
+        for kind in ("phone", "email", "social", "hours", "description"):
+            for value in data.get(kind, []):
+                remember(kind, str(value), source_url)
+
+        if not found["website"] and data.get("website"):
+            found["website"] = str(data["website"])
+        if not found["phone"] and data.get("phone"):
+            found["phone"] = str(data["phone"][0])
+        if not found["hours"] and data.get("hours"):
+            found["hours"] = str(data["hours"][0])
+        if not found["rating"] and data.get("rating"):
+            found["rating"] = str(data["rating"])
+        if found["reviews_count"] is None and data.get("reviews_count") is not None:
+            found["reviews_count"] = data["reviews_count"]
+        if not found["category"] and data.get("category"):
+            found["category"] = str(data["category"])
+
+        address = str(data.get("address") or "").strip()
+        if address:
+            if not found["address"]:
+                found["address"] = address
+            if found["lat"] is None and data.get("lat") is not None:
+                found["lat"] = data["lat"]
+            if found["lon"] is None and data.get("lon") is not None:
+                found["lon"] = data["lon"]
+            try:
+                added_location = add_location(
+                    conn,
+                    business_id,
+                    str(row["source"]),
+                    str(row["source_id"]),
+                    address,
+                    phone=str((data.get("phone") or [""])[0]),
+                    lat=data.get("lat"),
+                    lon=data.get("lon"),
+                    url=str(payload.get("url") or row["url"] or ""),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("не удалось сохранить точку %s", business_id)
+            else:
+                if added_location:
+                    found["locations_added"] += 1
+
+    values = {
+        "website": found["website"],
+        "phone": found["phone"],
+        "hours": found["hours"],
+        "rating": found["rating"],
+        "reviews_count": found["reviews_count"],
+        "category": found["category"],
+        "address": found["address"],
+        "lat": found["lat"],
+        "lon": found["lon"],
+    }
+    fill_empty_fields(conn, business_id, values)
+    return found
+
+
+async def enrich(business_id: str) -> dict:
+    """Собрать факты из сохранённых источников и с сайта бизнеса.
+
+    Сначала используются payload'ы 2ГИС/Яндекса (контакты, соцсети, адреса),
+    затем обходится сайт, а его техническое состояние сохраняется для карточки.
+    Возвращает словарь с ``status``, ``message``, ``added`` и ``errors``.
     """
     added: dict[str, int] = {}
     errors: list[str] = []
@@ -620,11 +730,12 @@ async def enrich(business_id: str) -> dict:
     try:
         lead = get_lead(conn, business_id)
         if not lead:
-            return {"added": added, "errors": ["организация не найдена"]}
-
-        website = str(lead.get("website") or "").strip()
-        if not _is_http_url(website):
-            return {"added": added, "errors": ["нет сайта"]}
+            return {
+                "status": "error",
+                "message": "Организация не найдена.",
+                "added": added,
+                "errors": ["организация не найдена"],
+            }
 
         seen_facts, seen_phone_keys, seen_photo_keys = _load_existing_facts(
             conn, business_id
@@ -659,6 +770,51 @@ async def enrich(business_id: str) -> dict:
             added[kind] = added.get(kind, 0) + 1
             return True
 
+        # 1. Контакты и адреса из уже сохранённых источников — без сети.
+        payload_found = _apply_source_payloads(conn, business_id, remember)
+        lead = get_lead(conn, business_id) or lead
+
+        website = str(lead.get("website") or "").strip()
+        if not _is_http_url(website):
+            set_site_audit(conn, business_id, {})
+            socials = [
+                item["value"] for item in (lead.get("facts") or {}).get("social", [])
+            ]
+            if added or payload_found["locations_added"]:
+                message = "Сайта нет — собрали контакты и данные из источников."
+            else:
+                message = (
+                    "Сайта нет, и новых данных в источниках не нашлось. "
+                    "Можно работать по телефону из карточки."
+                )
+            if socials:
+                message += f" Найдены соцсети: {len(socials)}."
+            return {
+                "status": "no_site",
+                "message": message,
+                "website": "",
+                "site_audit": None,
+                "added": added,
+                "errors": errors,
+            }
+
+        if site_audit.is_social_url(website):
+            # Вместо сайта указана соцсеть: обходить нечего, но ссылка полезна.
+            remember("social", website, website)
+            set_site_audit(conn, business_id, {})
+            message = (
+                "Вместо сайта указана соцсеть — обходить нечего. "
+                "Собрали контакты из источников; сайт можно предложить как развитие."
+            )
+            return {
+                "status": "social_only",
+                "message": message,
+                "website": website,
+                "site_audit": None,
+                "added": added,
+                "errors": errors,
+            }
+
         queue: deque[str] = deque()
         queued: set[tuple[str, str, str]] = set()
 
@@ -689,6 +845,10 @@ async def enrich(business_id: str) -> dict:
         processed = 0
         attempts = 0
         discovered_photos: list[str] = []
+        audit_main: dict | None = None
+        audit_fallback: dict | None = None
+        audit_error = ""
+        main_key = _page_key(_strip_fragment(website))
 
         async with httpx.AsyncClient(
             timeout=PAGE_TIMEOUT,
@@ -707,16 +867,23 @@ async def enrich(business_id: str) -> dict:
                 timeout = min(PAGE_TIMEOUT, remaining)
 
                 try:
+                    started = time.monotonic()
                     response = await asyncio.wait_for(client.get(url), timeout=timeout)
                 except (asyncio.TimeoutError, httpx.TimeoutException):
+                    if attempts == 1 and not audit_error:
+                        audit_error = "таймаут"
                     _note_error(errors, f"{url}: таймаут")
                     logger.info("таймаут при загрузке %s", url)
                     continue
                 except httpx.HTTPError as exc:
+                    if attempts == 1 and not audit_error:
+                        audit_error = exc.__class__.__name__
                     _note_error(errors, f"{url}: {exc.__class__.__name__}")
                     logger.info("ошибка загрузки %s: %s", url, exc)
                     continue
                 except Exception:
+                    if attempts == 1 and not audit_error:
+                        audit_error = "ошибка загрузки"
                     _note_error(errors, f"{url}: ошибка загрузки")
                     logger.exception("неожиданная ошибка загрузки %s", url)
                     continue
@@ -725,6 +892,8 @@ async def enrich(business_id: str) -> dict:
                     logger.debug("страница не найдена, пропускаю: %s", url)
                     continue
                 if response.status_code >= 400:
+                    if attempts == 1 and not audit_error:
+                        audit_error = f"HTTP {response.status_code}"
                     _note_error(errors, f"{url}: HTTP {response.status_code}")
                     logger.info("HTTP %s для %s", response.status_code, url)
                     continue
@@ -736,12 +905,34 @@ async def enrich(business_id: str) -> dict:
 
                 content_type = response.headers.get("content-type", "").lower()
                 if content_type and "html" not in content_type and "xml" not in content_type:
+                    if attempts == 1 and not audit_error:
+                        audit_error = f"не HTML ({content_type})"
                     logger.debug("не HTML, пропускаю: %s (%s)", final_url, content_type)
                     continue
                 if len(response.content) > MAX_HTML_BYTES:
+                    if attempts == 1 and not audit_error:
+                        audit_error = "страница слишком большая"
                     _note_error(errors, f"{final_url}: страница слишком большая")
                     logger.info("страница больше %s байт: %s", MAX_HTML_BYTES, final_url)
                     continue
+
+                if audit_main is None:
+                    try:
+                        page_audit = site_audit.audit_page(
+                            response.text,
+                            website,
+                            status=response.status_code,
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                            final_url=final_url,
+                            headers=dict(response.headers),
+                        )
+                    except Exception:  # noqa: BLE001 — аудит не должен ломать обход
+                        logger.exception("не удалось построить аудит %s", final_url)
+                    else:
+                        if _page_key(final_url) == main_key:
+                            audit_main = page_audit
+                        elif audit_fallback is None:
+                            audit_fallback = page_audit
 
                 try:
                     soup = BeautifulSoup(response.content, "html.parser")
@@ -784,13 +975,40 @@ async def enrich(business_id: str) -> dict:
                     if len(queue) < MAX_ATTEMPTS:
                         push(link)
 
+        audit = audit_main or audit_fallback
+        if audit is None:
+            audit = site_audit.empty_audit(
+                website, error=audit_error or "сайт не открылся"
+            )
+        set_site_audit(conn, business_id, audit)
+
+        total_added = sum(added.values()) + payload_found["locations_added"]
+        if processed:
+            message = (
+                f"Сайт проверен, добавлено фактов: {total_added}."
+                if total_added
+                else "Сайт проверен, новых данных не найдено."
+            )
+        else:
+            message = (
+                "Сайт не открылся — сохранили отметку о недоступности. "
+                "Контакты из источников собраны."
+            )
+
         logger.info(
             "обогащение %s завершено: страниц=%s, фактов=%s, ошибок=%s",
             business_id,
             processed,
-            sum(added.values()),
+            total_added,
             len(errors),
         )
-        return {"added": added, "errors": errors}
+        return {
+            "status": "ok" if processed else "error",
+            "message": message,
+            "website": website,
+            "site_audit": audit,
+            "added": added,
+            "errors": errors,
+        }
     finally:
         conn.close()

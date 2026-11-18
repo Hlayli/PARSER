@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS business (
     price_range TEXT NOT NULL DEFAULT '',
     hours TEXT NOT NULL DEFAULT '',
     photos_json TEXT NOT NULL DEFAULT '[]',
+    site_json TEXT NOT NULL DEFAULT '{}',
     url TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'new',
     is_favorite INTEGER NOT NULL DEFAULT 0,
@@ -200,6 +201,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE business ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
             )
+    if "site_json" not in business_columns:
+        # Технический аудит сайта: HTTPS, мобильная версия, формы, CMS.
+        conn.execute(
+            "ALTER TABLE business ADD COLUMN site_json TEXT NOT NULL DEFAULT '{}'"
+        )
     location_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(business_location)")
     }
@@ -516,7 +522,8 @@ def _lead_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     ]
     locations_count = conn.execute(
         "SELECT COUNT(DISTINCT CASE WHEN address_key != '' THEN address_key "
-        "ELSE '#' || rowid END) c FROM business_location WHERE business_id = ?",
+        "ELSE '#' || rowid END) c FROM business_location WHERE business_id = ? "
+        "AND (address != '' OR phone != '')",
         (row["id"],),
     ).fetchone()["c"] or 1
     try:
@@ -626,6 +633,9 @@ def get_lead(conn: sqlite3.Connection, business_id: str) -> dict | None:
         "FROM business_location WHERE business_id = ? ORDER BY address_key, address, source",
         (business_id,),
     ):
+        if not str(r["address"] or "").strip() and not str(r["phone"] or "").strip():
+            # Пустая техническая запись: показывать нечего.
+            continue
         merged = None
         if r["address_key"]:
             for location in locations:
@@ -664,6 +674,30 @@ def get_lead(conn: sqlite3.Connection, business_id: str) -> dict | None:
             "SELECT source, url FROM business_source WHERE business_id = ?", (business_id,)
         )
     ]
+    try:
+        audit = json.loads(row["site_json"] or "{}")
+    except (TypeError, ValueError):
+        audit = {}
+    lead["site_audit"] = audit if isinstance(audit, dict) else {}
+
+    # Продажная аналитика считается на чтении: она не требует сети и всегда
+    # соответствует текущим данным карточки.
+    from .intel import build_intel
+
+    intel = build_intel(lead)
+    # Пустая карточка не должна выглядеть «перспективной» только из-за
+    # отсутствия сайта: без названия и контактов работать не с чем.
+    if not any(
+        str(lead.get(key) or "").strip()
+        for key in ("name", "category", "address", "phone", "website")
+    ) and not lead.get("facts") and not lead.get("locations"):
+        intel["score"] = 5
+        intel["label"] = "низкий"
+        intel["hooks"] = []
+        intel["strengths"] = []
+        intel["gaps"] = []
+        intel["summary"] = "Недостаточно данных: в карточке нет названия, контактов и сайта."
+    lead["intel"] = intel
     return lead
 
 
@@ -691,6 +725,139 @@ def set_status(
     sets.append("updated_at = ?")
     params.extend([now(), business_id])
     cur = conn.execute(f"UPDATE business SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def set_site_audit(
+    conn: sqlite3.Connection, business_id: str, audit: dict
+) -> None:
+    """Сохранить последний технический аудит сайта."""
+    payload = json.dumps(audit or {}, ensure_ascii=False)
+    conn.execute(
+        "UPDATE business SET site_json = ?, updated_at = ? WHERE id = ?",
+        (payload, now(), business_id),
+    )
+    conn.commit()
+
+
+FILLABLE_FIELDS = (
+    "category", "address", "phone", "website", "hours", "price_range",
+    "rating", "reviews_count", "lat", "lon",
+)
+
+
+def fill_empty_fields(
+    conn: sqlite3.Connection, business_id: str, values: dict
+) -> list[str]:
+    """Заполнить только пустые поля карточки. Ручные данные не перезаписываем."""
+    row = conn.execute("SELECT * FROM business WHERE id = ?", (business_id,)).fetchone()
+    if not row:
+        return []
+
+    sets: list[str] = []
+    params: list[object] = []
+    filled: list[str] = []
+    for field in FILLABLE_FIELDS:
+        if field not in values:
+            continue
+        value = values[field]
+        if value is None or value == "":
+            continue
+        current = row[field]
+        if current not in (None, "", 0):
+            continue
+        if field in ("rating", "lat", "lon"):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            # Нулевой рейтинг/координаты не считаем полезными.
+            if field == "rating" and value <= 0:
+                continue
+        elif field == "reviews_count":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+        else:
+            value = str(value).strip()
+            if not value:
+                continue
+
+        sets.append(f"{field} = ?")
+        params.append(value)
+        filled.append(field)
+        if field == "phone":
+            sets.append("phone_norm = ?")
+            params.append(normalize_phone(str(value)))
+
+    if not sets:
+        return []
+    sets.append("updated_at = ?")
+    params.extend([now(), business_id])
+    conn.execute(
+        f"UPDATE business SET {', '.join(sets)} WHERE id = ?", params
+    )
+    _refresh_keys(conn, business_id)
+    conn.commit()
+    return filled
+
+
+def add_location(
+    conn: sqlite3.Connection,
+    business_id: str,
+    source: str,
+    source_id: str,
+    address: str,
+    phone: str = "",
+    lat: float | None = None,
+    lon: float | None = None,
+    url: str = "",
+) -> bool:
+    """Добавить точку из сохранённого payload'а, если такого адреса ещё нет."""
+    address = (address or "").strip()
+    if not address:
+        return False
+    address_key = dedup.address_key(address)
+    existing = conn.execute(
+        "SELECT rowid, * FROM business_location WHERE business_id = ? "
+        "AND ((source = ? AND source_id = ?) OR address_key = ? OR address = ?) LIMIT 1",
+        (business_id, source, source_id, address_key, address),
+    ).fetchone()
+    if existing:
+        # Дополняем только пустые поля уже известной точки. Пустая запись,
+        # созданная при первом сканировании, получает адрес из payload'а.
+        updates: dict[str, object] = {}
+        if not str(existing["address"] or "").strip():
+            updates["address"] = address
+            updates["address_key"] = address_key
+        if not existing["phone"] and phone:
+            updates["phone"] = phone
+        if existing["lat"] is None and lat is not None:
+            updates["lat"] = lat
+        if existing["lon"] is None and lon is not None:
+            updates["lon"] = lon
+        if not existing["url"] and url:
+            updates["url"] = url
+        if updates:
+            sets = ", ".join(f"{field} = ?" for field in updates)
+            conn.execute(
+                f"UPDATE business_location SET {sets} WHERE rowid = ?",
+                (*updates.values(), existing["rowid"]),
+            )
+            conn.commit()
+            return "address" in updates
+        return False
+
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO business_location
+               (business_id, source, source_id, address, address_key, phone, lat, lon, url)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (business_id, source, source_id, address, address_key, phone, lat, lon, url),
+    )
     conn.commit()
     return cur.rowcount > 0
 
@@ -804,6 +971,11 @@ def _merge_rows(conn: sqlite3.Connection, keep_id: str, drop_id: str) -> None:
     photos = _merge_photos(keep["photos_json"], drop_photos)
     if photos != keep_photos:
         updates["photos_json"] = json.dumps(photos, ensure_ascii=False)
+
+    if str(keep["site_json"] or "").strip() in ("", "{}") and str(
+        drop["site_json"] or ""
+    ).strip() not in ("", "{}"):
+        updates["site_json"] = drop["site_json"]
 
     updates["is_demo"] = 1 if (keep["is_demo"] and drop["is_demo"]) else 0
     updates["first_seen"] = min(keep["first_seen"] or now(), drop["first_seen"] or now())
